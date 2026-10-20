@@ -7,6 +7,7 @@ Tailors one LaTeX resume to job descriptions and tracks applications.
 - `/match <careers page url>`: find and rank the best-fit open roles on a company's careers page (saved in matches.json).
 - `/score-jobs`: give tracker jobs without a fit score a real one.
 - `/answer <record id> <question>`: answer a job-application question for any tracked job (saved in the tracker).
+- `/sync-gmail [ids file]`: import Gmail application-confirmation emails into the tracker (links tracked jobs, adds untracked ones).
 - `/outreach <company>`: find the top 5 recruiters at a company and write a short cold email to each (saved in outreach.json for review; never sent by Claude).
 
 ## Layout
@@ -20,7 +21,7 @@ Tailors one LaTeX resume to job descriptions and tracks applications.
 - `tools/check_resume.py`: compiles and verifies a run's `resume.tex` against the base; runs automatically after each edit.
 - `base/profile.json`: name, contact details, home location, job-search start date (`searchStart`) and application defaults, used for PDF names, job-location filters, the Gmail counters, the prefill script (`tools/apply/autofill.js`) and for the cold-email signature; null means the user answers it themselves.
 - `outreach.json`: cold-email campaigns. Change it only through `python3 tools/outreach.py`. Emails attach the resume set by `coldEmailResume` in profile.json (default: the base PDF).
-- `tools/inbox.py`: counts applications per day from Gmail confirmation emails (read-only IMAP, same app password); feeds the daily counter.
+- `tools/inbox.py`: counts applications per day from Gmail confirmation emails (read-only IMAP, same app password); feeds the daily counter, and lists confirmations not yet in the tracker (`pending`). Tracker jobs keep the Message-IDs of their confirmations in `gmail_ids`; import them only via `tracker.py import-gmail`.
 - `tools/server.py`: optional local web page for the tracker; queues /tailor, /tailor-combined, /track and /answer runs and runs 2 at a time (`--parallel N`).
 
 ## Rules

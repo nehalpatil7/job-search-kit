@@ -153,4 +153,8 @@ Today's applications against a target of 50, with the last 7 days below. The cou
 
 The totals row starts with **Gmail since <date>**: applications (confirmation emails) and rejections (emails saying you're not moving forward), counted since `searchStart` in `base/profile.json`. Change that date when a new search starts. The tracker's own pipeline counts (tracked, Saved, Resume ready, Applied…) follow, smaller.
 
+**Import from Gmail.** The Applications toolbar shows **Import N from Gmail** when confirmation emails since the search start aren't in the tracker yet. It runs Claude in batches of 100: each email's company, role and location are read from the email, and it's linked to the matching tracked job (marking it Applied with the email's date if needed) or added as a new job ("Added from Gmail" under Details). An email that names no role is linked to the closest-dated job at that company that doesn't have an email yet, and only becomes an "Unknown role" job when there's none. Each email is imported once (its Message-ID is stored on the job as `gmail_ids`). From the terminal: `/sync-gmail` in Claude Code.
+
+The counter's column shows the last 30 days, back to the search start at most.
+
 Check what was counted for a day: `python3 tools/inbox.py --list YYYY-MM-DD`. Totals: `python3 tools/inbox.py --totals`.

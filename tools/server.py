@@ -46,7 +46,7 @@ ALLOWED_TOOLS = ",".join([
     "Bash(python3 tools/check_resume.py *)", "Bash(python3 tools/tracker.py *)", "Bash(python3 tools/careers.py *)",
     # runs may find recruiters and save drafts, never send: sending is a button the user presses
     "Bash(python3 tools/outreach.py find *)", "Bash(python3 tools/outreach.py add *)",
-    "Bash(python3 tools/outreach.py import-contacts *)",
+    "Bash(python3 tools/outreach.py import-contacts *)", "Bash(python3 tools/inbox.py pending *)",
     # Apollo fallback for /outreach: free people search + email reveal (1 credit each, capped by the skill and outreach.py)
     "mcp__claude_ai_Apollo_io__apollo_mixed_people_api_search", "mcp__claude_ai_Apollo_io__apollo_people_bulk_match",
 ])
@@ -455,16 +455,40 @@ _inbox_lock = threading.Lock()
 
 
 def applied_daily(refresh=False):
-    """Applications per day from Gmail confirmations, cached; None data with an error when Gmail isn't reachable."""
+    """Applications per day from Gmail confirmations, cached; None data with an error when Gmail isn't reachable.
+    `pending` lists confirmations since the search start that aren't linked to a tracker job yet."""
     with _inbox_lock:
         age = time.time() - _inbox["at"]
         if age > INBOX_TTL or (refresh and age > INBOX_MIN_AGE):
             try:
-                _inbox.update(data=inbox.daily(8), error=None)
+                _inbox.update(data=inbox.daily(31), error=None)
             except Exception as exc:  # no app password, offline, IMAP error: the page falls back to the tracker
                 _inbox.update(error=str(exc)[:200])
             _inbox["at"] = time.time()
-        return {"data": _inbox["data"], "error": _inbox["error"]}
+        data = _inbox["data"]
+    if not data:
+        return {"data": None, "error": _inbox["error"], "pending": []}
+    done = inbox.imported_ids(tracker.load())
+    todo = [x["id"] for x in data["since_start"] if x["id"] not in done]
+    view = {k: v for k, v in data.items() if k not in ("since_start", "rejections")}
+    return {"data": view, "error": _inbox["error"], "pending": todo}
+
+
+SYNC_BATCH = 100   # emails per import run
+
+
+def start_sync():
+    """Queue Gmail-import runs, one per batch of confirmations not yet in the tracker."""
+    require_claude()
+    with JOBS_LOCK:
+        if any(j.mode == "sync-gmail" and j.status in ("queued", "running") for j in JOBS.values()):
+            raise ValueError("A Gmail import is already running.")
+    todo = applied_daily(refresh=True)["pending"]
+    if not todo:
+        raise ValueError("Nothing to import: every confirmation since the search start is already in the tracker.")
+    batches = [todo[i:i + SYNC_BATCH] for i in range(0, len(todo), SYNC_BATCH)]
+    return [enqueue(Job("sync-gmail", f"Batch {n} of {len(batches)}: {len(ids)} emails"), "ids.json", json.dumps(ids))
+            for n, ids in enumerate(batches, 1)]
 
 
 def jobs_view():
@@ -576,6 +600,11 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 return self.error(400, str(exc))
             return self.send(200, job.view())
+        if path == "/api/sync-gmail":
+            try:
+                return self.send(200, {"jobs": [j.view() for j in start_sync()]})
+            except ValueError as exc:
+                return self.error(400, str(exc))
         if path == "/api/score-unscored":
             try:
                 jobs = start_score()
@@ -701,7 +730,10 @@ def main():
     ap.add_argument("--parallel", type=int, default=PARALLEL, help="Claude Code runs at once (default 2)")
     args = ap.parse_args()
     PORT, PARALLEL = args.port, max(1, args.parallel)
-    shutil.rmtree(WORK, ignore_errors=True)  # leftovers from a previous server session
+    # leftovers from a previous server session; folders younger than a run's timeout may belong to a live run
+    for d in WORK.glob("*") if WORK.exists() else []:
+        if time.time() - d.stat().st_mtime > RUN_TIMEOUT:
+            shutil.rmtree(d, ignore_errors=True)
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"Job tracker running at http://localhost:{PORT}  ({PARALLEL} runs at a time; Ctrl+C to stop)")
     if not CLAUDE:

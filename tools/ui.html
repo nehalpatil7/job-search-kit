@@ -223,6 +223,7 @@
       <select id="filter"></select>
       <select id="sort"><option value="new">Newest first</option><option value="fit">Best fit first</option></select>
       <button id="btn-score" hidden></button>
+      <button id="btn-gmail" hidden title="Adds the jobs from Gmail confirmation emails to the tracker, and links the ones already tracked"></button>
     </div>
     <div class="table-wrap">
       <table>
@@ -332,7 +333,7 @@ function render() {
       ${a.notes ? `<div class="md">${md(a.notes)}</div>` : `<div class="muted">No notes for this job.</div>`}
       ${qaSection(a)}
       ${a.jd ? `<details><summary>Job description</summary><pre class="jd">${esc(a.jd)}</pre></details>` : ""}
-      <div class="row"><span class="muted">${a.source === "tailored" ? ((a.combined_with || []).length ? `Combined resume, also used for ${esc(a.combined_with.join("; "))}` : "Tailored resume") : "Tracked only"} · ${esc(a.resume || "no resume")}</span>
+      <div class="row"><span class="muted">${a.source === "tailored" ? ((a.combined_with || []).length ? `Combined resume, also used for ${esc(a.combined_with.join("; "))}` : "Tailored resume") : a.source === "gmail" ? "Added from Gmail" : "Tracked only"} · ${esc(a.resume || "no resume")}</span>
       ${a.url && a.resume ? `<button class="link" data-autofill="${a.id}" title="Opens the posting in Chrome, attaches this job's resume and fills what it can. You review and submit.">Prefill application ↗</button>` : ""}
       <button class="link danger" data-delete="${a.id}">Remove from tracker</button></div></td></tr>`;
   }).join("");
@@ -353,21 +354,26 @@ function renderStats() {
 }
 
 // --- daily target: jobs applied today (by date_applied), past days drip down below it
-const DAILY_TARGET = 50, DRIP_DAYS = 7;
+const DAILY_TARGET = 50, DRIP_DAYS = 30;   // past days shown, back to the search start at most
 const isoDay = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-let dailyShown = null, inboxDaily = null, inboxChecking = true;
+let dailyShown = null, inboxDaily = null, inboxChecking = true, gmailPending = 0;
 async function loadInboxDaily() {  // always a fresh Gmail check (the server reuses one under 20 s old)
   inboxChecking = true; renderDaily();
-  try { const d = await api("/api/applied-daily?refresh=1"); inboxDaily = d.data || inboxDaily; } catch { /* keep the last counts */ }
-  inboxChecking = false; renderStats(); renderDaily();
+  try { const d = await api("/api/applied-daily?refresh=1"); inboxDaily = d.data || inboxDaily; gmailPending = (d.pending || []).length; }
+  catch { /* keep the last counts */ }
+  inboxChecking = false; renderStats(); renderDaily(); renderGmailButton();
 }
 function renderDaily() {
   const tracked = {}; apps.forEach(a => { if (a.date_applied) tracked[a.date_applied] = (tracked[a.date_applied] || 0) + 1; });
   const perDay = inboxDaily ? inboxDaily.days : tracked;  // Gmail confirmations cover every site you apply on
   const day = new Date(), today = perDay[isoDay(day)] || 0, past = [];
+  const start = inboxDaily && inboxDaily.total ? inboxDaily.total.since : "";
   for (let i = 1; i <= DRIP_DAYS; i++) {
     day.setDate(day.getDate() - 1);
-    past.push({label: day.toLocaleDateString(undefined, {weekday: "short", month: "short", day: "numeric"}), n: perDay[isoDay(day)] || 0});
+    if (start && isoDay(day) < start) break;   // nothing to show before the job search began
+    past.push({label: day.toLocaleDateString(undefined, {weekday: "short", month: "short", day: "numeric"}),
+               short: day.toLocaleDateString(undefined, i < 7 ? {weekday: "short"} : {month: "short", day: "numeric"}),
+               n: perDay[isoDay(day)] || 0});
   }
   const key = JSON.stringify([!!inboxDaily, today, past.map(p => p.n)]);
   const label = inboxChecking ? "checking Gmail…" : `via ${inboxDaily ? "Gmail" : "tracker"}`;
@@ -381,8 +387,8 @@ function renderDaily() {
     <div class="cap" title="${esc(src)}">applied today</div><div class="src" title="${esc(src)}">${label}</div>
     <div class="bar"><i class="${met ? "met" : ""}" style="width:${Math.min(100, today / DAILY_TARGET * 100)}%"></i></div>
     <div class="drip">${past.map((p, i) => `<div class="${p.n >= DAILY_TARGET ? "met" : ""}"
-      style="font-size:${15 - i * 1.1}px; opacity:${1 - i * 0.11}; animation-delay:${i * 60}ms"
-      title="${esc(p.label)}: ${p.n} applied"><span>${esc(p.label.split(",")[0])}</span>${p.n}</div>`).join("")}</div>`;
+      style="font-size:${Math.max(10.5, 15 - i * 0.3)}px; opacity:${Math.max(0.3, 1 - i * 0.024)}; animation-delay:${i * 20}ms"
+      title="${esc(p.label)}: ${p.n} applied"><span>${esc(p.short)}</span>${p.n}</div>`).join("")}</div>`;
 }
 
 $("rows").addEventListener("change", async e => {
@@ -404,6 +410,13 @@ $("rows").addEventListener("click", async e => {
   }
 });
 $("search").oninput = render; $("filter").onchange = render; $("sort").onchange = render;
+function renderGmailButton() {
+  $("btn-gmail").hidden = !gmailPending || !hasClaude;
+  $("btn-gmail").textContent = `Import ${gmailPending} from Gmail`;
+}
+$("btn-gmail").onclick = async () => {
+  try { await api("/api/sync-gmail", {method: "POST"}); $("btn-gmail").hidden = true; await refreshJobs(); } catch (err) { alert(err.message); }
+};
 $("btn-score").onclick = async () => {
   try { await api("/api/score-unscored", {method: "POST"}); await refreshJobs(); } catch (err) { alert(err.message); }
 };
@@ -702,7 +715,7 @@ $("o-list").addEventListener("click", async e => {
 // --- Claude Code runs (queued; the server runs a few at a time)
 const showLog = new Set(), hideResult = new Set();
 const TITLES = {tailor: "Tailor", track: "Track", answer: "Answer", "tailor-combined": "Combined", autofill: "Prefill", match: "Match", "score-jobs": "Score",
-                outreach: "Cold email", "send-emails": "Send"};
+                outreach: "Cold email", "send-emails": "Send", "sync-gmail": "Gmail import"};
 const LABEL = {queued: "Queued", running: "Running…", done: "Done", failed: "Failed", cancelled: "Cancelled"};
 const active = (j) => j.status === "queued" || j.status === "running";
 
@@ -783,6 +796,7 @@ async function refreshJobs() {
     || (j.saved || []).length > (savedBefore.get(j.id) || 0));
   renderRuns();
   if (justFinished) loadApps();
+  if (jobs.some(j => j.mode === "sync-gmail" && !active(j) && before.get(j.id) && before.get(j.id) !== j.status)) loadInboxDaily();  // recount what's left to import
   const busy = jobs.some(active);
   if (busy && !pollTimer) pollTimer = setInterval(refreshJobs, 1500);
   if (!busy && pollTimer) { clearInterval(pollTimer); pollTimer = null; loadApps(); }

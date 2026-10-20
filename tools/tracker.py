@@ -9,6 +9,7 @@ Usage:
                                [--clean-work .work/<run>]
   python3 tools/tracker.py update ID [--status S] [--notes-file F]
   python3 tools/tracker.py add-combined --manifest WORK/jobs.json --resume-from WORK/<First>_<Last>_Resume.pdf [--clean-work WORK]
+  python3 tools/tracker.py import-gmail --file WORK/import.json [--clean-work WORK]
   python3 tools/tracker.py list
   python3 tools/tracker.py base-pdf
   python3 tools/tracker.py show ID
@@ -397,6 +398,57 @@ def add_combined(manifest_path, resume_from, clean_work=None):
     return dest, out, warns
 
 
+def import_gmail(file, clean_work=None):
+    """Link Gmail application confirmations to tracker jobs, adding the jobs that aren't tracked yet.
+
+    file: [{"gmail_id", "company", "role", "location", "match": <tracker id or null>}], next to the emails.json
+    written by `inbox.py pending` (each gmail_id must be one of those emails; its date becomes the applied date).
+    """
+    items = json.loads(Path(file).read_text())
+    emails = {e["id"]: e for e in json.loads((Path(file).parent / "emails.json").read_text())}
+    out, problems = [], []
+    with locked():
+        records = load()
+        linked = {g for r in records for g in r.get("gmail_ids", [])}
+        for it in items:
+            gid, company = it.get("gmail_id"), (it.get("company") or "").strip()
+            role = (it.get("role") or "").strip() or "Unknown role"
+            if gid not in emails:
+                problems.append(f"{gid}: not one of the emails in emails.json")
+                continue
+            if gid in linked:
+                continue
+            if not company:
+                problems.append(f"{gid}: no company")
+                continue
+            day = emails[gid]["date"]
+            rec = next((r for r in records if r["id"] == it.get("match")), None) if it.get("match") else None
+            rec = rec or find_existing(records, "", company, role)
+            created = rec is None
+            if created:
+                rec = {"id": max((r["id"] for r in records), default=0) + 1, "date_added": day, "date_applied": day,
+                       "company": company, "role": role, "location": (it.get("location") or "").strip(), "url": "",
+                       "status": "Applied", "source": "gmail", "resume": "", "notes": "", "jd": ""}
+                records.append(rec)
+            else:
+                if STATUSES.index(rec.get("status", "Saved")) < STATUSES.index("Applied"):
+                    rec["status"] = "Applied"
+                if not rec.get("date_applied"):
+                    rec["date_applied"] = day
+                if not rec.get("location") and it.get("location"):
+                    rec["location"] = it["location"].strip()
+            rec.setdefault("gmail_ids", []).append(gid)
+            rec["updated"] = now()
+            linked.add(gid)
+            out.append((rec, created))
+        save(records)
+    if clean_work:
+        d = Path(clean_work).resolve()
+        if WORK.resolve() in d.parents:
+            shutil.rmtree(d, ignore_errors=True)
+    return out, problems
+
+
 def update(rec_id, **fields):
     with locked():
         records = load()
@@ -472,6 +524,10 @@ def main():
     rb = sub.add_parser("backfill-random", help="give unscored jobs a RANDOM fit score (marked 'random'; permanent)")
     rb.add_argument("--yes", action="store_true")
 
+    ig = sub.add_parser("import-gmail", help="link Gmail confirmations to jobs (adding untracked ones) from WORK/import.json")
+    ig.add_argument("--file", required=True)
+    ig.add_argument("--clean-work", metavar="DIR")
+
     sub.add_parser("list")
     sub.add_parser("base-pdf")
 
@@ -533,6 +589,13 @@ def main():
                  "source": "random"} for r in load() if not r.get("fit")]
         done, _ = set_fits(todo, "random")
         print(f"Gave {len(done)} job(s) a random fit score (marked 'random').")
+    elif args.cmd == "import-gmail":
+        out, problems = import_gmail(args.file, args.clean_work)
+        for rec, created in out:
+            print(f"{'Added' if created else 'Updated'} #{rec['id']}: {rec['company']} - {rec['role']} [{rec['status']}] from Gmail")
+        print(f"Imported {len(out)} confirmation(s): {sum(c for _, c in out)} new job(s), {sum(not c for _, c in out)} linked to tracked jobs.")
+        for x in problems:
+            print(f"  SKIPPED {x}")
     elif args.cmd == "list":
         for r in load():
             print(f"#{r['id']:<4}{r['date_added']}  {r['status']:<13}{r['company']} - {r['role']}  "
