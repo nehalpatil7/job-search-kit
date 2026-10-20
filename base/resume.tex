@@ -1,0 +1,84 @@
+\documentclass[10pt, letterpaper]{article}
+
+% Packages
+\usepackage[margin=0.40in, top=0.2in, bottom=0.3in]{geometry}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{array}
+\usepackage{mathptmx}
+\usepackage[T1]{fontenc}
+
+% Formatting
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0em}
+\renewcommand{\labelitemi}{$\bullet$}
+
+% section and subsection spacing
+\titleformat{\section}{\normalsize\bfseries}{}{0em}{}[\titlerule]
+\titlespacing{\section}{0pt}{0.5em}{0.2em} % space after section title
+\titleformat{\subsection}[runin]{\bfseries}{}{0em}{} % Subsection inline with content
+\titlespacing{\subsection}{0pt}{0.1em}{-0.5em} % space after subsection title
+
+% Document
+\begin{document}
+
+
+% Header
+\begin{center}
+    \textbf{\Large JORDAN LEE} \\
+    Denver, CO | \href{tel:+15555550123}{555-555-0123} | \href{mailto:jordan.lee@example.com}{jordan.lee@example.com} | \href{https://linkedin.com/in/example}{linkedin.com/in/example} | \href{https://github.com/example}{github.com/example}
+\end{center}
+\vspace{-1em}
+
+
+% Experience
+\section*{EXPERIENCE}
+
+\textbf{Software Engineer - Example Corp}, \textit{Denver, CO} \hfill Jan 2023 -- Present
+\vspace{-0.6em}
+\begin{itemize}[leftmargin=2em, itemsep=0pt, parsep=0pt]
+    \item Built an event-driven order pipeline processing 2M+ daily events with Kafka consumers and idempotent handlers, holding P95 end-to-end latency under 200ms during seasonal peaks.
+    \item Led the migration of a monolithic billing service to 4 independently deployable Java services, coordinating zero-downtime cutovers across 12 dependent teams.
+    \item Designed a rules-based routing engine with priority-ordered configuration and a safe default, replacing hard-coded logic and cutting routing errors by 30\%.
+    \item Introduced contract tests and canary deployments in the CI/CD pipeline, reducing production rollbacks by 40\% over two quarters.
+    \item Wrote design docs, ran design reviews for the platform team, and took part in the on-call rotation for customer-facing services.
+\end{itemize}
+\vspace{-0.2em}
+
+\textbf{Software Engineer - Sample Labs}, \textit{Seattle, WA} \hfill Jun 2020 -- Dec 2022
+\vspace{-0.6em}
+\begin{itemize}[leftmargin=2em, itemsep=0pt, parsep=0pt]
+    \item Built REST APIs in Node.js and PostgreSQL for a marketplace serving 500K+ monthly users, adding Redis caching that cut median response time by 35\%.
+    \item Automated infrastructure with Terraform and Docker on AWS, shrinking new-environment setup from days to under an hour.
+    \item Mentored 3 junior engineers and set the team's code-review checklist, improving first-pass review approval by 25\%.
+    \item Added structured logging and dashboards that shortened incident diagnosis from hours to minutes for the payments team.
+\end{itemize}
+\vspace{-0.2em}
+
+\textbf{Software Engineering Intern - Placeholder Inc}, \textit{Remote} \hfill May 2019 -- Aug 2019
+\vspace{-0.6em}
+\begin{itemize}[leftmargin=2em, itemsep=0pt, parsep=0pt]
+    \item Built a Python data-validation tool that flagged schema drift in nightly ETL jobs, catching 15+ data issues before they reached reports.
+    \item Wrote integration tests for the internal analytics API, raising coverage from 52\% to 81\%.
+\end{itemize}
+\vspace{-0.2em}
+
+
+% Skills
+\section*{SKILLS \& CERTIFICATIONS}
+
+\textbf{Programming Languages:} Java, Python, JavaScript/TypeScript, SQL, Go\\
+\textbf{Backend \& Distributed Systems:} Microservices, REST APIs, Kafka, Event-Driven Architecture, Distributed Systems\\
+\textbf{Cloud \& Infrastructure:} AWS, Kubernetes, Docker, Terraform, CI/CD, Git\\
+\textbf{Databases:} PostgreSQL, MySQL, Redis, DynamoDB\\
+\textbf{Certifications:} AWS Certified Developer - Associate
+
+
+% Education
+\section*{EDUCATION}
+
+\textbf{Example State University}, Bachelor of Science - Computer Science, Denver, CO \hfill Aug 2016 -- May 2020
+
+
+\end{document}

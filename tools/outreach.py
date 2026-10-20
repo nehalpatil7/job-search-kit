@@ -1,0 +1,568 @@
+#!/usr/bin/env python3
+"""Cold email to recruiters: find them (Hunter.io), store Claude-written emails, push Gmail drafts, send.
+
+Stored in outreach.json at the project root. Uses only the Python standard library.
+
+Usage:
+  python3 tools/outreach.py status                                  # what is set up (Gmail, Hunter, resume, today's sends)
+  python3 tools/outreach.py find --company "Stripe" [--domain stripe.com] --work .work/<run> [--apollo]
+        # Hunter domain search (HR department), ranks recruiters, writes the top 5 to WORK/contacts.json.
+        # With --apollo, prints APOLLO_NEEDED instead of failing when Hunter is out of searches or finds nobody.
+  python3 tools/outreach.py import-contacts --work WORK --file WORK/apollo.json
+        # merge Apollo-enriched recruiters ([{email, first_name, last_name, title, linkedin, email_status}]) into contacts.json
+  python3 tools/outreach.py add --file WORK/emails.json [--clean-work WORK]
+        # save the written emails as a campaign (status "draft"); every address must come from WORK/contacts.json
+  python3 tools/outreach.py list
+  python3 tools/outreach.py eml CID EID OUT.eml                 # write one email as a .eml file to preview it
+  python3 tools/outreach.py draft CID EID                       # put one email in Gmail Drafts (IMAP)
+  python3 tools/outreach.py send CID EID [EID ...]              # send now (SMTP); refuses repeats and the daily cap
+
+emails.json: {"company", "domain", "angle", "emails": [{"email", "subject", "body"}]}. Bodies are plain text: paragraphs separated by blank lines, "- " for bullets, no greeting
+signature: the signature (from base/profile.json) is appended when the message is built.
+
+Secrets come from environment variables or the macOS Keychain:
+  GMAIL_APP_PASSWORD  or  security add-generic-password -s resume-tailor-gmail -a "$USER" -w
+  HUNTER_API_KEY      or  security add-generic-password -s resume-tailor-hunter -a "$USER" -w
+"""
+import argparse
+import contextlib
+import datetime as dt
+import html
+import imaplib
+import json
+import os
+import random
+import re
+import shutil
+import smtplib
+import ssl
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from email.message import EmailMessage
+from email.utils import formataddr, make_msgid
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / "outreach.json"
+PROFILE = ROOT / "base" / "profile.json"
+TRACKER = ROOT / "tracker.json"
+WORK = ROOT / ".work"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import me  # noqa: E402
+
+# the resume attached to every email: profile "coldEmailResume" (a path, relative to the project or absolute), else the base PDF
+RESUME_PDF = ROOT / (me.profile().get("coldEmailResume") or f"resumes/{me.name_slug()}_Resume.pdf")
+ATTACH_NAME = f"{me.name_slug()}_Resume.pdf"   # the name recruiters see
+TOP_N = 5
+DAILY_CAP = 25                                 # cold emails per day; keeps the Gmail account's reputation safe
+MAX_WORDS = 150                                # body without signature
+SEND_GAP = (20, 45)                            # seconds between sends in one batch
+DRAFTS = '"[Gmail]/Drafts"'
+HUNTER = "https://api.hunter.io/v2/domain-search"
+APOLLO_MAX = 5                                 # Apollo credits one run may spend (fallback only)
+STATUSES = ["draft", "gmail_draft", "sent", "failed"]
+
+
+# ---------- storage ----------
+
+@contextlib.contextmanager
+def locked():
+    with open(ROOT / ".outreach.lock", "w") as fh:
+        try:
+            import fcntl
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        except ImportError:
+            pass
+        yield
+
+
+def load():
+    if not DATA.exists():
+        return []
+    try:
+        return json.loads(DATA.read_text() or "[]")
+    except json.JSONDecodeError:
+        sys.exit(f"outreach.json is not valid JSON; fix or restore it ({DATA})")
+
+
+def save(campaigns):
+    tmp = DATA.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(campaigns, indent=2, ensure_ascii=False) + "\n")
+    os.replace(tmp, DATA)
+
+
+def now():
+    return dt.datetime.now().isoformat(timespec="seconds")
+
+
+def find_email(campaigns, cid, eid):
+    camp = next((c for c in campaigns if c["id"] == cid), None)
+    item = camp and next((e for e in camp["emails"] if e["id"] == eid), None)
+    if not item:
+        raise ValueError(f"No email #{cid}.{eid}")
+    return camp, item
+
+
+def contacted():
+    """Addresses already emailed (sent) in any campaign: never email anyone twice."""
+    return {e["email"].lower() for c in load() for e in c["emails"] if e["status"] == "sent"}
+
+
+def sent_today():
+    day = dt.date.today().isoformat()
+    return sum(1 for c in load() for e in c["emails"] if e["status"] == "sent" and (e.get("sent_at") or "").startswith(day))
+
+
+# ---------- secrets and setup ----------
+
+def secret(env, service):
+    if os.environ.get(env):
+        return os.environ[env].strip()
+    if shutil.which("security"):
+        out = subprocess.run(["security", "find-generic-password", "-s", service, "-w"], capture_output=True, text=True)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    return None
+
+
+def gmail_password():
+    return (secret("GMAIL_APP_PASSWORD", "resume-tailor-gmail") or "").replace(" ", "") or None
+
+
+def hunter_key():
+    return secret("HUNTER_API_KEY", "resume-tailor-hunter")
+
+
+def profile():
+    return json.loads(PROFILE.read_text())
+
+
+def status():
+    return {"gmail": bool(gmail_password()), "hunter": bool(hunter_key()), "resume": RESUME_PDF.exists(),
+            "resume_path": str(RESUME_PDF), "attach_name": ATTACH_NAME, "sender": profile().get("email"), "sent_today": sent_today(),
+            "daily_cap": DAILY_CAP}
+
+
+# ---------- finding recruiters ----------
+
+def hunter_left():
+    """Domain searches left this month (the account call itself is free); None if unknown."""
+    try:
+        url = "https://api.hunter.io/v2/account?" + urllib.parse.urlencode({"api_key": hunter_key()})
+        with urllib.request.urlopen(url, timeout=20) as res:
+            return ((json.load(res).get("data") or {}).get("requests") or {}).get("searches", {}).get("remaining")
+    except Exception:
+        return None
+
+
+class HunterOut(Exception):
+    pass
+
+
+def hunter_search(company, domain=None):
+    key = hunter_key()
+    if not key:
+        sys.exit("No Hunter API key. Run: security add-generic-password -s resume-tailor-hunter -a \"$USER\" -w")
+    params = {"department": "hr", "type": "personal", "limit": 10, "api_key": key}
+    params["domain" if domain else "company"] = domain or company
+    try:
+        with urllib.request.urlopen(f"{HUNTER}?{urllib.parse.urlencode(params)}", timeout=30) as res:
+            return json.load(res).get("data") or {}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")[:300]
+        if exc.code in (402, 429) or re.search(r"usage|credit|limit", detail, re.I):
+            raise HunterOut(detail)
+        sys.exit(f"Hunter search failed ({exc.code}): {detail}")
+    except urllib.error.URLError as exc:
+        sys.exit(f"Could not reach Hunter: {exc.reason}")
+
+
+TECH = re.compile(r"technical|engineering|software|\btech\b|r&d|product|developer")
+NON_TECH = re.compile(r"executive|sales|\bgtm\b|go-to-market|finance|legal|marketing|g&a|corporate|retail store|hourly")
+# only hands-on recruiters (recruiter, senior/technical recruiter, TA partner, sourcer); leaders and ops never reply to cold email
+NOT_IC = re.compile(r"director|\bhead\b|\bvp\b|vice president|chief|manager|\bmgr\b|operations|\bops\b|coordinator|"
+                    r"business partner|people partner|hrbp|enablement|program|analyst|systems|brand|marketing|scheduler")
+
+
+def rank(c):
+    """Score a Hunter contact as a target for a software engineer; None means skip."""
+    title = (c.get("position") or "").lower()
+    ver = ((c.get("verification") or {}).get("status") or "unknown").lower()
+    if ver == "invalid" or not c.get("value"):
+        return None
+    if not re.search(r"recruit|talent acquisition|sourc", title) or NOT_IC.search(title):
+        return None            # no title, not a recruiter, or a leader / ops role
+    if NON_TECH.search(title) and not TECH.search(title):
+        return None            # sales, executive, finance... recruiters don't hire engineers
+    s = 40 if TECH.search(title) else 0
+    s += 30 if "recruit" in title else 25 if "talent" in title else 15
+    s += 5 if re.search(r"\bsenior\b|\bsr\b|\blead\b|principal|staff", title) else 0
+    s += 10 if re.search(r"university|campus|early.career|new grad|emerging", title) else 0
+    s += {"valid": 15, "accept_all": 0}.get(ver, -5)
+    return s + (c.get("confidence") or 0) / 10
+
+
+def find(company, domain, work):
+    hunter = "ok"
+    if hunter_left() == 0:
+        data, hunter = {}, "out_of_searches"
+    else:
+        try:
+            data = hunter_search(company, domain)
+        except HunterOut:
+            data, hunter = {}, "out_of_searches"
+    seen = contacted()
+    ranked = []
+    for c in data.get("emails") or []:
+        score = rank(c)
+        if score is None or c["value"].lower() in seen:
+            continue
+        ranked.append({"email": c["value"], "first_name": c.get("first_name") or "", "last_name": c.get("last_name") or "",
+                       "title": c.get("position") or "", "linkedin": c.get("linkedin") or "",
+                       "verification": (c.get("verification") or {}).get("status") or "unknown",
+                       "confidence": c.get("confidence"), "score": round(score, 1)})
+    ranked.sort(key=lambda x: -x["score"])
+    for c in ranked:
+        c["source"] = "hunter"
+    out = {"company": data.get("organization") or company, "domain": data.get("domain") or domain or "",
+           "contacts": ranked[:TOP_N], "found": len(data.get("emails") or []), "already_contacted": len(seen),
+           "hunter": hunter}
+    Path(work).mkdir(parents=True, exist_ok=True)
+    Path(work, "contacts.json").write_text(json.dumps(out, indent=2, ensure_ascii=False))
+    return out
+
+
+APOLLO_STATUS = {"verified": "valid", "likely to engage": "accept_all", "extrapolated": "unknown"}
+
+
+def import_contacts(work, file):
+    """Merge Apollo-enriched recruiters into WORK/contacts.json, ranked like Hunter's, top TOP_N kept."""
+    cfile = Path(work, "contacts.json")
+    out = json.loads(cfile.read_text())
+    have = {c["email"].lower() for c in out["contacts"]}
+    seen = contacted()
+    domain = (out.get("domain") or "").lower().removeprefix("www.")
+    people = json.loads(Path(file).read_text())
+    if len(people) > APOLLO_MAX:
+        sys.exit(f"At most {APOLLO_MAX} Apollo contacts per run.")
+    added, skipped = [], []
+    for p in people:
+        addr = (p.get("email") or "").strip()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", addr):
+            skipped.append(f"{p.get('first_name', '?')}: no work email")
+            continue
+        if domain and not addr.lower().endswith("@" + domain) and not addr.lower().endswith("." + domain):
+            skipped.append(f"{addr}: not an @{domain} address")
+            continue
+        if addr.lower() in have or addr.lower() in seen:
+            skipped.append(f"{addr}: already a contact or already emailed")
+            continue
+        ver = APOLLO_STATUS.get((p.get("email_status") or "").lower(), "unknown")
+        score = rank({"value": addr, "position": p.get("title"), "verification": {"status": ver}, "confidence": 80 if ver == "valid" else 50})
+        if score is None:
+            skipped.append(f"{addr}: not a recruiter or invalid")
+            continue
+        added.append({"email": addr, "first_name": p.get("first_name") or "", "last_name": p.get("last_name") or "",
+                      "title": p.get("title") or "", "linkedin": p.get("linkedin") or "", "verification": ver,
+                      "confidence": None, "score": round(score, 1), "source": "apollo"})
+    out["contacts"] = sorted(out["contacts"] + added, key=lambda x: -x["score"])[:TOP_N]
+    cfile.write_text(json.dumps(out, indent=2, ensure_ascii=False))
+    return out, added, skipped
+
+
+def tracked_jobs(company):
+    """Jobs at this company in the tracker (best hook for the email: roles already applied to)."""
+    if not TRACKER.exists():
+        return []
+    key = re.sub(r"[^a-z0-9]", "", company.lower().split(" ")[0])
+    return [r for r in json.loads(TRACKER.read_text())
+            if key and re.sub(r"[^a-z0-9]", "", (r.get("company") or "").lower()).startswith(key)]
+
+
+# ---------- campaigns ----------
+
+def words(text):
+    return len(re.findall(r"\S+", text))
+
+
+def check_email(item):
+    errs = []
+    if not (item.get("subject") or "").strip() or len(item["subject"]) > 80:
+        errs.append("subject must be 1-80 characters")
+    employer = (profile().get("currentCompany") or "").strip()
+    if employer and employer.lower() in (item.get("subject") or "").lower():
+        errs.append(f"keep {employer} out of the subject; keep it simple")
+    body = (item.get("body") or "").strip()
+    if not body:
+        errs.append("body is empty")
+    elif words(body) > MAX_WORDS:
+        errs.append(f"body is {words(body)} words; keep it under {MAX_WORDS}")
+    if re.search(r"\[[^\]]+\]|\{[^}]+\}|<[^>]+>", body + item.get("subject", "")):
+        errs.append("leftover placeholder like [..], {..} or <..>")
+    first = re.escape((profile().get("firstName") or "").lower()) or r"\w+"
+    if re.search(rf"(?im)^(best|thanks|thank you|regards|cheers|sincerely)[,!]?\s*\n+\s*{first}", body):
+        errs.append("leave out the sign-off and name; the signature is added automatically")
+    return errs
+
+
+def add(file, clean_work=None):
+    spec = json.loads(Path(file).read_text())
+    cfile = Path(file).parent / "contacts.json"
+    if not cfile.exists():
+        sys.exit(f"Expected {cfile} from `find` next to the emails file.")
+    contacts = {c["email"].lower(): c for c in json.loads(cfile.read_text())["contacts"]}
+    seen = contacted()
+    emails, problems = [], []
+    for n, it in enumerate(spec.get("emails") or [], 1):
+        addr = (it.get("email") or "").strip()
+        c = contacts.get(addr.lower())
+        if not c:
+            problems.append(f"{addr or f'email {n}'}: not one of the contacts found by `find`")
+            continue
+        if addr.lower() in seen:
+            problems.append(f"{addr}: already emailed in an earlier campaign")
+            continue
+        problems += [f"{addr}: {e}" for e in check_email(it)]
+        emails.append({"id": n, "email": addr, "name": f"{c['first_name']} {c['last_name']}".strip(), "title": c["title"],
+                       "verification": c.get("verification"), "linkedin": c.get("linkedin", ""),
+                       "subject": it["subject"].strip(), "body": it["body"].strip(), "status": "draft",
+                       "created": now(), "sent_at": "", "error": ""})
+    if problems:
+        sys.exit("Refusing to save; fix these and run again:\n  " + "\n  ".join(problems))
+    if not emails:
+        sys.exit("No emails to save.")
+    with locked():
+        campaigns = load()
+        camp = {"id": max((c["id"] for c in campaigns), default=0) + 1, "company": spec.get("company", "").strip(),
+                "domain": spec.get("domain", ""), "angle": spec.get("angle", ""), "date": now(),
+                "emails": emails}
+        campaigns.append(camp)
+        save(campaigns)
+    if clean_work:
+        d = Path(clean_work).resolve()
+        if WORK.resolve() in d.parents:
+            shutil.rmtree(d, ignore_errors=True)
+    return camp
+
+
+def edit(cid, eid, subject=None, body=None):
+    with locked():
+        campaigns = load()
+        _, item = find_email(campaigns, cid, eid)
+        if item["status"] == "sent":
+            raise ValueError("Already sent; it can't be edited.")
+        new = dict(item, subject=subject if subject is not None else item["subject"],
+                   body=body if body is not None else item["body"])
+        errs = check_email(new)
+        if errs:
+            raise ValueError("; ".join(errs))
+        item.update(subject=new["subject"].strip(), body=new["body"].strip(), updated=now())
+        save(campaigns)
+        return item
+
+
+def delete(cid, eid=None):
+    with locked():
+        campaigns = load()
+        if eid is None:
+            keep = [c for c in campaigns if c["id"] != cid]
+        else:
+            camp, _ = find_email(campaigns, cid, eid)
+            camp["emails"] = [e for e in camp["emails"] if e["id"] != eid]
+            keep = [c for c in campaigns if c["emails"]]
+        save(keep)
+
+
+def set_status(cid, eid, **fields):
+    with locked():
+        campaigns = load()
+        _, item = find_email(campaigns, cid, eid)
+        item.update(fields)
+        save(campaigns)
+        return item
+
+
+# ---------- building the message ----------
+
+def signature():
+    p = profile()
+    name = f"{p.get('preferredName') or p['firstName']} {p['lastName']}"
+    links = [(p.get("linkedin") or ""), (p.get("github") or ""), (p.get("portfolio") or "")]
+    return name, p.get("phone") or "", [l for l in links if l]
+
+
+def short(url):
+    return re.sub(r"^https?://(www\.)?", "", url).rstrip("/")
+
+
+BULLET = re.compile(r"^\s*[-•]\s+")
+
+
+def tight(body):
+    """The body without the blank line before a bullet list: the list follows its lead-in line directly."""
+    return re.sub(r"\n\s*\n(?=\s*[-•]\s)", "\n", body.strip())
+
+
+def to_html(body):
+    out = []
+    for block in re.split(r"\n\s*\n", body.strip()):
+        lines = block.splitlines()
+        if all(BULLET.match(l) for l in lines):
+            if out and out[-1] == "<div><br></div>":
+                out.pop()   # no blank line between the lead-in paragraph and its bullets
+            out.append('<ul style="margin-top:0;margin-bottom:0">'
+                       + "".join(f"<li>{html.escape(BULLET.sub('', l))}</li>" for l in lines) + "</ul><div><br></div>")
+        else:
+            out += ["<div>" + "<br>".join(html.escape(l) for l in lines) + "</div>", "<div><br></div>"]
+    return "".join(out)
+
+
+def build(camp, item, to=None):
+    p = profile()
+    name, phone, links = signature()
+    text = f"{tight(item['body'])}\n\nBest,\n{name}\n" + "\n".join([phone] + [short(l) for l in links]) + "\n"
+    sig_html = (f"<div>Best,<br>{html.escape(name)}<br>{html.escape(phone)}<br>"
+                + "<br>".join(f'<a href="{html.escape(l)}">{html.escape(short(l))}</a>' for l in links) + "</div>")
+    msg = EmailMessage()
+    msg["From"] = formataddr((name, p["email"]))
+    msg["To"] = formataddr((item.get("name") or "", to or item["email"]))
+    msg["Subject"] = item["subject"]
+    msg["Message-ID"] = make_msgid(domain=p["email"].split("@")[-1])
+    msg.set_content(text)
+    msg.add_alternative(f'<div dir="ltr">{to_html(item["body"])}{sig_html}</div>', subtype="html")
+    if not RESUME_PDF.exists():
+        raise ValueError(f"Resume not found: {RESUME_PDF}")
+    msg.add_attachment(RESUME_PDF.read_bytes(), maintype="application", subtype="pdf", filename=ATTACH_NAME)
+    return msg
+
+
+def login_args():
+    pw = gmail_password()
+    if not pw:
+        raise ValueError("No Gmail app password. Run: security add-generic-password -s resume-tailor-gmail -a \"$USER\" -w")
+    return profile()["email"], pw
+
+
+def gmail_draft(cid, eid):
+    camp, item = find_email(load(), cid, eid)
+    if item["status"] == "sent":
+        raise ValueError("Already sent.")
+    msg = build(camp, item)
+    user, pw = login_args()
+    with imaplib.IMAP4_SSL("imap.gmail.com") as imap:
+        imap.login(user, pw)
+        typ, data = imap.append(DRAFTS, r"(\Draft)", imaplib.Time2Internaldate(time.time()), msg.as_bytes())
+        if typ != "OK":
+            raise RuntimeError(f"Gmail refused the draft: {data}")
+    return set_status(cid, eid, status="gmail_draft", drafted_at=now(), error="")
+
+
+def send_one(cid, eid):
+    camp, item = find_email(load(), cid, eid)
+    if item["status"] == "sent" or item["email"].lower() in contacted():
+        raise ValueError(f"{item['email']} was already emailed.")
+    if sent_today() >= DAILY_CAP:
+        raise ValueError(f"Daily cap reached ({DAILY_CAP} sent today). Send the rest tomorrow.")
+    msg = build(camp, item)
+    user, pw = login_args()
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context(), timeout=60) as smtp:
+            smtp.login(user, pw)
+            smtp.send_message(msg)
+    except Exception as exc:
+        set_status(cid, eid, status="failed", error=str(exc)[:300])
+        raise
+    return set_status(cid, eid, status="sent", sent_at=now(), error="", message_id=msg["Message-ID"])
+
+
+# ---------- CLI ----------
+
+def main():
+    p = argparse.ArgumentParser(description="Cold email to recruiters")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status")
+    f = sub.add_parser("find")
+    f.add_argument("--company", required=True)
+    f.add_argument("--domain")
+    f.add_argument("--work", required=True)
+    f.add_argument("--apollo", action="store_true", help="Apollo fallback approved: don't fail when Hunter can't help")
+    ic = sub.add_parser("import-contacts")
+    ic.add_argument("--work", required=True)
+    ic.add_argument("--file", required=True)
+    a = sub.add_parser("add")
+    a.add_argument("--file", required=True)
+    a.add_argument("--clean-work", metavar="DIR")
+    sub.add_parser("list")
+    e = sub.add_parser("eml")
+    e.add_argument("cid", type=int)
+    e.add_argument("eid", type=int)
+    e.add_argument("out")
+    d = sub.add_parser("draft")
+    d.add_argument("cid", type=int)
+    d.add_argument("eid", type=int)
+    s = sub.add_parser("send")
+    s.add_argument("cid", type=int)
+    s.add_argument("eids", type=int, nargs="+")
+    args = p.parse_args()
+
+    try:
+        if args.cmd == "status":
+            print(json.dumps(status(), indent=2))
+        elif args.cmd == "find":
+            company = args.company.strip()
+            domain = args.domain or (company if re.fullmatch(r"[\w-]+(\.[\w-]+)+", company) else None)
+            out = find(company, domain, args.work)
+            print(f"{out['company']} ({out['domain'] or 'domain unknown'}): Hunter {out['hunter']}, {out['found']} HR contacts found, "
+                  f"top {len(out['contacts'])} kept -> {args.work}/contacts.json")
+            for c in out["contacts"]:
+                print(f"  {c['score']:>5}  {c['first_name']} {c['last_name']}, {c['title'] or '(no title)'} <{c['email']}> [{c['verification']}]")
+            jobs = tracked_jobs(out["company"])
+            if jobs:
+                print("Tracked jobs at this company (status, fit):")
+                for r in jobs[:10]:
+                    print(f"  #{r['id']} {r['role']} [{r['status']}] fit {(r.get('fit') or {}).get('score', '-')}")
+            if not out["contacts"]:
+                why = "Hunter is out of searches this month" if out["hunter"] != "ok" else "Hunter found no recruiters"
+                if args.apollo:
+                    print(f"APOLLO_NEEDED: {why}. Use Apollo for up to {APOLLO_MAX} contacts.")
+                else:
+                    sys.exit(f"FAILED: no recruiters found at {out['company']} ({why}"
+                             + ("; the rest were already contacted" if out["found"] else "") + "). Tick 'Use Apollo' to try Apollo.")
+        elif args.cmd == "import-contacts":
+            out, added, skipped = import_contacts(args.work, args.file)
+            print(f"Imported {len(added)} Apollo contact(s); {len(out['contacts'])} contacts in {args.work}/contacts.json")
+            for x in skipped:
+                print(f"  skipped {x}")
+            if not out["contacts"]:
+                sys.exit(f"FAILED: no usable recruiter emails at {out['company']} from Hunter or Apollo.")
+        elif args.cmd == "add":
+            camp = add(args.file, args.clean_work)
+            print(f"Saved outreach #{camp['id']}: {camp['company']} ({len(camp['emails'])} emails)")
+        elif args.cmd == "list":
+            for c in load():
+                print(f"#{c['id']} {c['date'][:10]} {c['company']}")
+                for e in c["emails"]:
+                    print(f"   .{e['id']} {e['status']:<12}{e['name']} <{e['email']}>  {e['subject']}")
+        elif args.cmd == "eml":
+            camp, item = find_email(load(), args.cid, args.eid)
+            Path(args.out).write_bytes(bytes(build(camp, item)))
+            print(f"Wrote {args.out}")
+        elif args.cmd == "draft":
+            item = gmail_draft(args.cid, args.eid)
+            print(f"Gmail draft created for {item['email']}")
+        elif args.cmd == "send":
+            for n, eid in enumerate(args.eids):
+                if n:
+                    time.sleep(random.uniform(*SEND_GAP))
+                item = send_one(args.cid, eid)
+                print(f"Sent to {item['email']}")
+    except (ValueError, RuntimeError, OSError, smtplib.SMTPException, imaplib.IMAP4.error) as exc:
+        sys.exit(f"FAILED: {exc}")
+
+
+if __name__ == "__main__":
+    main()

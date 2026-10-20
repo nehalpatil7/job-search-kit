@@ -1,0 +1,797 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Job Tracker</title>
+<style>
+  :root {
+    --bg: #f6f6f3; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #e3e2dc;
+    --accent: #2f5d50; --accent-ink: #ffffff; --accent-soft: #e4eeea;
+    --warn: #9a5b00; --bad: #a33a2b; --good: #2f6f3e; --code: #f1f0eb;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161715; --panel: #1f201e; --ink: #ecebe6; --muted: #a2a19a; --line: #34352f;
+      --accent: #7fb8a4; --accent-ink: #10201b; --accent-soft: #24332e;
+      --warn: #e0a24a; --bad: #e07a6a; --good: #87c08f; --code: #292a27;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 24px 16px 64px; }
+  header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+  .title { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  /* daily counter sits in the right gutter, out of the page flow; narrower windows reserve a gutter for it */
+  .daily { position: absolute; top: 24px; right: 16px; width: 104px; text-align: right; font-variant-numeric: tabular-nums; }
+  @media (max-width: 1420px) { body { padding-right: 120px; } }
+  @media (max-width: 700px) {
+    body { padding-right: 0; }
+    .daily { position: static; width: auto; flex: none; } .drip { display: none; }
+  }
+  .daily .today { font-size: 34px; font-weight: 700; line-height: 1; color: var(--accent); letter-spacing: -0.02em; }
+  .daily .today.met { color: var(--good); }
+  .daily .today small { font-size: 15px; font-weight: 600; color: var(--muted); }
+  .daily .cap { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-top: 2px; }
+  .daily .src { font-size: 10px; color: var(--muted); }
+  .daily .bar { height: 3px; background: var(--line); border-radius: 2px; margin: 4px 0 6px auto; width: 100%; overflow: hidden; }
+  .daily .bar i { display: block; height: 100%; background: var(--accent); }
+  .daily .bar i.met { background: var(--good); }
+  .drip { display: flex; flex-direction: column; align-items: flex-end; }
+  .drip div { line-height: 1.25; color: var(--muted); white-space: nowrap; animation: drip .5s ease-out both; }
+  .drip div.met { color: var(--good); }
+  .drip span { font-size: 10px; margin-right: 6px; opacity: .8; }
+  @keyframes drip { from { opacity: 0; transform: translateY(-8px); } }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  a { color: var(--accent); }
+  .muted { color: var(--muted); }
+  .stats { display: flex; gap: 6px; flex-wrap: wrap; margin: 12px 0 0; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px; font-size: 13px; }
+  .stat b { font-variant-numeric: tabular-nums; }
+  .stat.gmail { border-color: var(--accent); }
+  .stats.split .stat:not(.gmail):not(.label) { font-size: 12px; padding: 2px 9px; color: var(--muted); }
+  .stats.split .stat:not(.gmail):not(.label) b { color: var(--ink); }
+  .stat.label { background: none; border: none; padding: 3px 0 3px 4px; color: var(--muted); font-size: 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin-bottom: 16px; }
+  textarea, input, select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+                            border-radius: 8px; padding: 8px 10px; width: 100%; }
+  textarea { min-height: 96px; resize: vertical; }
+  textarea:focus, input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+           border-radius: 8px; padding: 7px 14px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.link { border: none; background: none; color: var(--accent); padding: 4px 0; }
+  button.danger { color: var(--bad); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 10px; }
+  .banner { border-left: 3px solid var(--warn); padding: 8px 12px; background: var(--panel); margin-bottom: 16px; border-radius: 6px; }
+  .pill { display: inline-block; border-radius: 999px; padding: 1px 10px; font-size: 12px; font-weight: 600; background: var(--accent-soft); color: var(--accent); }
+  .pill.failed, .pill.cancelled { background: transparent; border: 1px solid var(--bad); color: var(--bad); }
+  .pill.done { color: var(--good); }
+  .log { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code); border-radius: 8px;
+         padding: 10px 12px; max-height: 260px; overflow: auto; margin-top: 10px; white-space: pre-wrap; word-break: break-word; }
+  .log .tool { color: var(--muted); }
+  .log .error { color: var(--bad); }
+  .log .text { color: var(--ink); }
+  .result { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .toolbar input { max-width: 260px; } .toolbar select { max-width: 180px; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; white-space: nowrap; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); }
+  td select { padding: 4px 6px; width: auto; }
+  tr.detail td { background: var(--bg); }
+  .md table { width: auto; margin: 8px 0; } .md th, .md td { padding: 4px 8px; border: 1px solid var(--line); }
+  .md h1, .md h2, .md h3 { font-size: 14px; margin: 14px 0 6px; }
+  .md ul { margin: 4px 0; padding-left: 20px; }
+  .md code { background: var(--code); padding: 0 4px; border-radius: 4px; }
+  details summary { cursor: pointer; color: var(--accent); margin-top: 8px; }
+  pre.jd { white-space: pre-wrap; font: 12px/1.5 ui-monospace, Menlo, monospace; background: var(--code); padding: 10px; border-radius: 8px; max-height: 360px; overflow: auto; }
+  .empty { text-align: center; padding: 28px; color: var(--muted); }
+  .qa-wrap { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+  .qa-wrap h3 { font-size: 14px; margin: 0 0 8px; }
+  .qa { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+  .qa .q { font-weight: 600; margin-bottom: 4px; }
+  .qa .a { white-space: pre-wrap; }
+  .qa .meta { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .qa .row { margin-top: 6px; }
+  .qa pre { white-space: pre-wrap; font: inherit; color: var(--muted); border-left: 2px solid var(--line); padding-left: 8px; margin: 6px 0; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
+  .seg button { border: none; border-radius: 0; padding: 5px 12px; }
+  .seg button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .ask-one { display: flex; gap: 8px; } .ask-one input { flex: 1; }
+  .busy { color: var(--accent); font-weight: 600; }
+  input[type=checkbox], input[type=radio] { width: auto; }
+  .fit { display: inline-block; min-width: 2.4em; text-align: center; border-radius: 6px; padding: 1px 6px; font-weight: 700;
+         font-variant-numeric: tabular-nums; font-size: 13px; }
+  .fit.Strong { background: var(--good); color: var(--panel); }
+  .fit.Good { background: var(--accent-soft); color: var(--accent); }
+  .fit.Moderate { background: transparent; color: var(--warn); border: 1px solid var(--warn); }
+  .fit.Stretch { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+  .fit.random { outline: 1px dashed var(--muted); }
+  .tag { font-size: 11px; font-weight: 600; border-radius: 4px; padding: 0 5px; margin-left: 4px; }
+  .tag.new { background: var(--accent); color: var(--accent-ink); }
+  .tag.tracked { border: 1px solid var(--line); color: var(--muted); }
+  .search { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 12px; }
+  .search summary { color: var(--ink); }
+  .search table td { font-size: 13px; }
+  .search .why { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .search .why .gap { color: var(--warn); }
+  .checks { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; margin-top: 8px; font-size: 13px; }
+  .run { border-top: 1px solid var(--line); padding: 10px 0; }
+  .run:first-child { border-top: none; }
+  .run-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .run-head .preview { flex: 1; min-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .run-head button { padding: 0; }
+  .run .last { font: 12px/1.5 ui-monospace, Menlo, monospace; color: var(--muted); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .run .needs { font-size: 13px; color: var(--warn); margin-top: 4px; }
+  .log .needs { color: var(--warn); }
+  .run .saved { font-size: 13px; color: var(--good); margin-top: 4px; }
+  .pill.queued { background: transparent; border: 1px solid var(--line); color: var(--muted); }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
+  .tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 14px; color: var(--muted); font-weight: 600; }
+  .tabs button.on { color: var(--ink); border-bottom-color: var(--accent); }
+  .setup { display: grid; gap: 6px; font-size: 13px; }
+  .setup .ok { color: var(--good); } .setup .no { color: var(--warn); }
+  .setup code { background: var(--code); padding: 1px 6px; border-radius: 4px; font-size: 12px; user-select: all; }
+  .camp { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px; }
+  .camp > summary { color: var(--ink); margin-top: 0; }
+  .mail { display: flex; gap: 8px; align-items: flex-start; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; margin-top: 6px; }
+  .mail > input[type=checkbox] { margin-top: 5px; }
+  .mail > details { flex: 1; min-width: 0; }
+  .mail summary { color: var(--ink); margin-top: 0; font-size: 13px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .mail summary .subj-line { flex: 1; min-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+  .mail input.subj { font-weight: 600; margin: 8px 0 6px; }
+  .mail textarea { min-height: 190px; font-size: 13px; }
+  .mail .meta { font-size: 12px; color: var(--muted); }
+  .mail .err { color: var(--bad); font-size: 12px; }
+  .pill.sent { color: var(--good); } .pill.gmail_draft { background: transparent; border: 1px solid var(--accent); }
+  .pill.failed { background: transparent; border: 1px solid var(--bad); color: var(--bad); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <div class="title"><h1>Job Tracker</h1><a href="/api/export.csv">Export CSV</a></div>
+      <div class="stats" id="stats"></div>
+    </div>
+    <div class="daily" id="daily"></div>
+  </header>
+
+  <nav class="tabs"><button data-tab="apps" class="on">Applications</button><button data-tab="outreach">Cold email</button></nav>
+
+  <div class="banner" id="no-claude" hidden>
+    Claude Code (the <code>claude</code> command) wasn't found, so Tailor and Track can't run from here.
+    The tracker and manual adds still work. Install Claude Code and restart the server to enable them.
+  </div>
+
+  <section class="panel" id="runs" hidden>
+    <div class="row" style="margin-top:0; justify-content: space-between;">
+      <h2 style="margin:0">Runs <span class="muted" id="runs-summary" style="font-weight:400"></span></h2>
+      <button class="link" id="btn-clear">Clear finished</button>
+    </div>
+    <div id="run-list"></div>
+  </section>
+
+  <div id="tab-apps">
+  <section class="panel">
+    <h2>Add a job</h2>
+    <textarea id="jd" placeholder="Paste one or more job links (one per line), or a full job description. For &quot;One resume for all&quot;, paste 2–5 links, or job descriptions separated by a line with ---"></textarea>
+    <div class="row">
+      <button class="primary" id="btn-tailor">Tailor resume + track</button>
+      <button id="btn-combined" title="One resume tailored to 2-5 jobs at once">One resume for all (2–5 jobs)</button>
+      <button id="btn-track">Track only</button>
+      <button class="link" id="btn-manual-toggle">Add manually instead</button>
+    </div>
+    <div id="manual" hidden>
+      <div class="grid">
+        <input id="m-company" placeholder="Company">
+        <input id="m-role" placeholder="Role">
+        <input id="m-location" placeholder="Location (optional)">
+        <input id="m-url" placeholder="Job link (optional)">
+        <select id="m-status"></select>
+      </div>
+      <div class="row"><button id="btn-manual-add">Add to tracker</button><span class="muted">Links the base resume. No Claude needed.</span></div>
+    </div>
+  </section>
+
+  <section class="panel" id="match-panel">
+    <h2>Match my profile</h2>
+    <div class="ask-one">
+      <input id="m-careers" placeholder="Paste a company's careers page link (Workday, Greenhouse, Lever, Ashby, SmartRecruiters or a custom page)">
+      <button class="primary" id="btn-match">Find best-fit roles</button>
+    </div>
+    <div class="checks muted">
+      <label><input type="checkbox" id="m-all-levels"> All levels</label>
+      <label><input type="checkbox" id="m-all-locations"> All locations</label>
+      <span>Default: engineering roles at your level near home (city/state in base/profile.json), remote or US-wide. The top 25 get scored.</span>
+    </div>
+    <div id="match-results"></div>
+  </section>
+
+  <section class="panel">
+    <div class="toolbar">
+      <h2 style="margin:0; margin-right:auto;">Applications</h2>
+      <input id="search" placeholder="Search company or role">
+      <select id="filter"></select>
+      <select id="sort"><option value="new">Newest first</option><option value="fit">Best fit first</option></select>
+      <button id="btn-score" hidden></button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Added</th><th>Company</th><th>Role</th><th>Fit</th><th>Status</th><th>Applied</th><th>Resume</th><th>Job</th><th></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+  </div>
+
+  <div id="tab-outreach" hidden>
+    <section class="panel">
+      <h2>Cold email recruiters</h2>
+      <div class="ask-one">
+        <input id="o-company" placeholder="Company name or domain, e.g. Stripe or stripe.com">
+        <button class="primary" id="btn-outreach">Find recruiters + write emails</button>
+      </div>
+      <div class="checks muted">
+        <label title="Only when Hunter is out of searches or finds no recruiters. Apollo's free plan blocks people search, so this needs a paid plan."><input type="checkbox" id="o-apollo"> Use Apollo as a fallback (up to 5 Apollo credits; needs a paid Apollo plan)</label>
+        <span>Finds the top 5 recruiters (Hunter.io, 1 search) and writes a short personalized email to each, with your resume attached. Nothing is sent until you press Send.</span></div>
+      <details style="margin-top:10px"><summary>Setup</summary><div class="setup" id="o-setup"></div></details>
+    </section>
+    <section class="panel">
+      <h2>Emails <span class="muted" id="o-summary" style="font-weight:400"></span></h2>
+      <div id="o-list"></div>
+    </section>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let apps = [], statuses = [], open = new Set(), jobs = [], pollTimer = null;
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {...opts, headers: {"Content-Type": "application/json", "X-Tracker": "1", ...(opts.headers || {})}});
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+// --- tiny markdown renderer for notes and run results (headings, lists, tables, bold, code)
+function inline(s) {
+  return esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+}
+function md(text) {
+  const lines = String(text || "").split("\n"); let out = [], i = 0;
+  while (i < lines.length) {
+    const l = lines[i];
+    if (/^\s*\|.*\|\s*$/.test(l)) {
+      const rows = []; while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(lines[i++]);
+      const cells = r => r.trim().replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+      const body = rows.filter(r => !/^\s*\|[\s:|-]+\|\s*$/.test(r));
+      out.push("<table>" + body.map((r, k) => "<tr>" + cells(r).map(c => k ? `<td>${inline(c)}</td>` : `<th>${inline(c)}</th>`).join("") + "</tr>").join("") + "</table>");
+      continue;
+    }
+    if (/^\s*[-*] /.test(l)) {
+      const items = []; while (i < lines.length && /^\s*[-*] /.test(lines[i])) items.push(lines[i++].replace(/^\s*[-*] /, ""));
+      out.push("<ul>" + items.map(x => `<li>${inline(x)}</li>`).join("") + "</ul>"); continue;
+    }
+    const h = l.match(/^(#{1,3})\s+(.*)/);
+    if (h) out.push(`<h3>${inline(h[2])}</h3>`); else if (l.trim()) out.push(`<p>${inline(l)}</p>`);
+    i++;
+  }
+  return out.join("");
+}
+
+// --- tracker
+async function loadApps() {
+  const data = await api("/api/applications");
+  apps = data.applications; statuses = data.statuses;
+  $("no-claude").hidden = data.claude; $("btn-tailor").disabled = $("btn-track").disabled = $("btn-combined").disabled = $("btn-match").disabled = !data.claude;
+  hasClaude = data.claude; basePdf = data.base_pdf;
+  const unscored = apps.filter(a => !a.fit).length;
+  $("btn-score").hidden = !unscored || !data.claude;
+  $("btn-score").textContent = `Score ${unscored} unscored`;
+  loadMatches();
+  if (!$("tab-outreach").hidden) loadOutreach();
+  if (!$("filter").options.length) {
+    $("filter").innerHTML = `<option value="">All statuses</option>` + statuses.map(s => `<option>${s}</option>`).join("");
+    $("m-status").innerHTML = statuses.map(s => `<option ${s === "Applied" ? "selected" : ""}>${s}</option>`).join("");
+  }
+  render();
+}
+
+function render() {
+  renderStats();
+  renderDaily();
+
+  const q = $("search").value.toLowerCase(), f = $("filter").value;
+  const list = apps.filter(a => (!f || a.status === f) && (!q || `${a.company} ${a.role}`.toLowerCase().includes(q)))
+                   .sort((a, b) => ($("sort").value === "fit" ? ((b.fit ? b.fit.score : -1) - (a.fit ? a.fit.score : -1)) : 0)
+                                   || (b.date_added || "").localeCompare(a.date_added || "") || b.id - a.id);
+  if (!list.length) { $("rows").innerHTML = `<tr><td colspan="9" class="empty">${apps.length ? "No matches." : "No jobs yet. Add one above."}</td></tr>`; return; }
+
+  $("rows").innerHTML = list.map(a => {
+    const resume = a.resume ? `<a href="/${encodeURI(a.resume)}" target="_blank">${a.resume.endsWith("/" + basePdf) ? "Base" : (a.combined_with || []).length ? "Combined" : "Tailored"} PDF</a>` : "—";
+    const link = a.url ? `<a href="${esc(a.url)}" target="_blank" rel="noopener">Posting ↗</a>` : "—";
+    const sel = `<select data-id="${a.id}" class="status">${statuses.map(s => `<option ${s === a.status ? "selected" : ""}>${s}</option>`).join("")}</select>`;
+    const row = `<tr>
+      <td class="num">${esc(a.date_added)}</td><td><b>${esc(a.company)}</b>${a.location ? `<div class="muted">${esc(a.location)}</div>` : ""}</td>
+      <td>${esc(a.role)}</td><td>${fitPill(a.fit)}</td><td>${sel}</td><td class="num">${esc(a.date_applied || "—")}</td><td>${resume}</td><td>${link}</td>
+      <td><button class="link" data-toggle="${a.id}">${open.has(a.id) ? "Hide" : "Details"}</button></td></tr>`;
+    if (!open.has(a.id)) return row;
+    return row + `<tr class="detail"><td colspan="9">
+      ${a.notes ? `<div class="md">${md(a.notes)}</div>` : `<div class="muted">No notes for this job.</div>`}
+      ${qaSection(a)}
+      ${a.jd ? `<details><summary>Job description</summary><pre class="jd">${esc(a.jd)}</pre></details>` : ""}
+      <div class="row"><span class="muted">${a.source === "tailored" ? ((a.combined_with || []).length ? `Combined resume, also used for ${esc(a.combined_with.join("; "))}` : "Tailored resume") : "Tracked only"} · ${esc(a.resume || "no resume")}</span>
+      ${a.url && a.resume ? `<button class="link" data-autofill="${a.id}" title="Opens the posting in Chrome, attaches this job's resume and fills what it can. You review and submit.">Prefill application ↗</button>` : ""}
+      <button class="link danger" data-delete="${a.id}">Remove from tracker</button></div></td></tr>`;
+  }).join("");
+}
+
+// --- totals: Gmail (every site you apply on) first, then the tracker's pipeline
+function renderStats() {
+  const counts = {}; apps.forEach(a => counts[a.status] = (counts[a.status] || 0) + 1);
+  const t = inboxDaily && inboxDaily.total;
+  const since = t ? new Date(t.since + "T00:00").toLocaleDateString(undefined, {month: "short", day: "numeric"}) : "";
+  const gmail = t ? `<span class="stat label">Gmail since ${esc(since)}</span>
+    <span class="stat gmail" title="Application-confirmation emails since ${esc(t.since)}"><b>${t.applied}</b> applied</span>
+    <span class="stat gmail" title="Rejection emails since ${esc(t.since)}"><b>${t.rejected}</b> rejected</span>
+    <span class="stat label">Tracker</span>` : "";
+  $("stats").classList.toggle("split", !!t);
+  $("stats").innerHTML = gmail + `<span class="stat"><b>${apps.length}</b> tracked</span>` +
+    statuses.filter(s => counts[s]).map(s => `<span class="stat"><b>${counts[s]}</b> ${s}</span>`).join("");
+}
+
+// --- daily target: jobs applied today (by date_applied), past days drip down below it
+const DAILY_TARGET = 50, DRIP_DAYS = 7;
+const isoDay = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+let dailyShown = null, inboxDaily = null, inboxChecking = true;
+async function loadInboxDaily() {  // always a fresh Gmail check (the server reuses one under 20 s old)
+  inboxChecking = true; renderDaily();
+  try { const d = await api("/api/applied-daily?refresh=1"); inboxDaily = d.data || inboxDaily; } catch { /* keep the last counts */ }
+  inboxChecking = false; renderStats(); renderDaily();
+}
+function renderDaily() {
+  const tracked = {}; apps.forEach(a => { if (a.date_applied) tracked[a.date_applied] = (tracked[a.date_applied] || 0) + 1; });
+  const perDay = inboxDaily ? inboxDaily.days : tracked;  // Gmail confirmations cover every site you apply on
+  const day = new Date(), today = perDay[isoDay(day)] || 0, past = [];
+  for (let i = 1; i <= DRIP_DAYS; i++) {
+    day.setDate(day.getDate() - 1);
+    past.push({label: day.toLocaleDateString(undefined, {weekday: "short", month: "short", day: "numeric"}), n: perDay[isoDay(day)] || 0});
+  }
+  const key = JSON.stringify([!!inboxDaily, today, past.map(p => p.n)]);
+  const label = inboxChecking ? "checking Gmail…" : `via ${inboxDaily ? "Gmail" : "tracker"}`;
+  if (key === dailyShown) { const el = $("daily").querySelector(".src"); if (el) el.textContent = label; return; }  // re-rendering would replay the drip
+  dailyShown = key;
+  const met = today >= DAILY_TARGET;
+  const src = inboxDaily
+    ? `Counted from application-confirmation emails in Gmail (checked ${inboxDaily.checked.slice(11, 16)}; click to recheck). Tracker: ${tracked[isoDay(new Date())] || 0} marked Applied today.`
+    : "Jobs marked Applied in the tracker today (Gmail not reachable)";
+  $("daily").innerHTML = `<div class="today ${met ? "met" : ""}" title="${esc(src)}" style="cursor:pointer" data-recheck="1">${today}<small> / ${DAILY_TARGET}</small></div>
+    <div class="cap" title="${esc(src)}">applied today</div><div class="src" title="${esc(src)}">${label}</div>
+    <div class="bar"><i class="${met ? "met" : ""}" style="width:${Math.min(100, today / DAILY_TARGET * 100)}%"></i></div>
+    <div class="drip">${past.map((p, i) => `<div class="${p.n >= DAILY_TARGET ? "met" : ""}"
+      style="font-size:${15 - i * 1.1}px; opacity:${1 - i * 0.11}; animation-delay:${i * 60}ms"
+      title="${esc(p.label)}: ${p.n} applied"><span>${esc(p.label.split(",")[0])}</span>${p.n}</div>`).join("")}</div>`;
+}
+
+$("rows").addEventListener("change", async e => {
+  if (!e.target.classList.contains("status")) return;
+  try { await api(`/api/applications/${e.target.dataset.id}`, {method: "PATCH", body: JSON.stringify({status: e.target.value})}); }
+  catch (err) { alert(err.message); }
+  loadApps();
+});
+$("rows").addEventListener("click", async e => {
+  const t = e.target.dataset.toggle, d = e.target.dataset.delete, af = e.target.dataset.autofill;
+  if (af) {
+    try { await api(`/api/applications/${af}/autofill`, {method: "POST"}); await refreshJobs(); }
+    catch (err) { alert(err.message); }
+    return;
+  }
+  if (t) { const id = +t; open.has(id) ? open.delete(id) : open.add(id); render(); }
+  if (d && confirm("Remove this job from the tracker? Its PDF stays in resumes/.")) {
+    await api(`/api/applications/${d}`, {method: "DELETE"}); loadApps();
+  }
+});
+$("search").oninput = render; $("filter").onchange = render; $("sort").onchange = render;
+$("btn-score").onclick = async () => {
+  try { await api("/api/score-unscored", {method: "POST"}); await refreshJobs(); } catch (err) { alert(err.message); }
+};
+
+// --- fit scores
+let hasClaude = false, basePdf = "";
+function fitPill(fit) {
+  if (!fit) return `<span class="muted" title="No fit score yet">—</span>`;
+  const tip = `${fit.label} fit (${fit.source})${fit.reason ? ": " + fit.reason : ""}`;
+  return `<span class="fit ${esc(fit.label)} ${fit.source === "random" ? "random" : ""}" title="${esc(tip)}">${fit.score}</span>`;
+}
+
+// --- Match my profile
+let searches = [], picked = new Set(), openSearch = null, newestSeen = null;
+const normUrl = (u) => { try { const x = new URL(u); return (x.host + x.pathname).replace(/\/+$/, "").toLowerCase(); } catch { return (u || "").toLowerCase(); } };
+
+async function loadMatches() {
+  try { searches = (await api("/api/matches")).searches || []; } catch { searches = []; }
+  renderMatches();
+}
+
+function renderMatches() {
+  const tracked = new Map(apps.filter(a => a.url).map(a => [normUrl(a.url), a]));
+  const list = searches.slice().reverse();
+  if (list.length && list[0].id !== newestSeen) { openSearch = list[0].id; newestSeen = list[0].id; }  // a new search opens itself
+  $("match-results").innerHTML = list.map(sr => {
+    const rows = (sr.results || []).map(r => {
+      const t = tracked.get(normUrl(r.url));
+      const key = `${sr.id}|${r.url}`;
+      return `<tr>
+        <td><span class="fit ${esc(r.label)}">${r.score}</span></td>
+        <td><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.title)}</a>${r.new ? `<span class="tag new">new</span>` : ""}${t ? `<span class="tag tracked">in tracker #${t.id}</span>` : ""}
+          <div class="why">${(r.reasons || []).map(esc).join(" · ")}${(r.gaps || []).length ? ` · <span class="gap">Gap: ${(r.gaps || []).map(esc).join("; ")}</span>` : ""}</div></td>
+        <td class="muted">${esc(r.location || "")}</td>
+        <td style="white-space:nowrap">
+          <button class="link" data-mact="tailor" data-url="${esc(r.url)}" data-score="${r.score}" ${hasClaude ? "" : "disabled"}>Tailor</button>
+          <button class="link" data-mact="track" data-url="${esc(r.url)}" data-score="${r.score}" ${hasClaude ? "" : "disabled"}>Track</button>
+          <label title="Pick 2–5 for one combined resume"><input type="checkbox" data-pick="${esc(key)}" ${picked.has(key) ? "checked" : ""}> combine</label>
+        </td></tr>`;
+    }).join("");
+    const meta = [sr.platform, sr.found != null ? `${sr.found} open roles` : "", sr.passed_filters != null ? `${sr.passed_filters} fit filters` : "",
+                  `${(sr.results || []).length} scored`].filter(Boolean).join(" · ");
+    return `<details class="search" data-search="${sr.id}" ${openSearch === sr.id ? "open" : ""}>
+      <summary><b>${esc(sr.company || sr.url)}</b> <span class="muted">${esc(meta)} · ${esc((sr.date || "").replace("T", " "))}</span></summary>
+      <div class="table-wrap"><table><tbody>${rows || `<tr><td class="empty">No roles scored.</td></tr>`}</tbody></table></div>
+      <div class="row"><button data-combine="${sr.id}" ${hasClaude ? "" : "disabled"}>One resume for the picked roles</button>
+        <button class="link" data-rerun="${esc(sr.url)}">Search again</button>
+        <button class="link danger" data-delsearch="${sr.id}">Delete this search</button></div>
+    </details>`;
+  }).join("");
+}
+
+$("btn-match").onclick = async () => {
+  const url = $("m-careers").value.trim();
+  try {
+    await api("/api/match", {method: "POST", body: JSON.stringify({url, all_levels: $("m-all-levels").checked, all_locations: $("m-all-locations").checked})});
+    $("m-careers").value = ""; await refreshJobs();
+  } catch (err) { alert(err.message); }
+};
+$("m-careers").addEventListener("keydown", e => { if (e.key === "Enter") $("btn-match").click(); });
+$("match-results").addEventListener("toggle", e => { if (e.target.open) openSearch = +e.target.dataset.search; }, true);
+$("match-results").addEventListener("change", e => {
+  const k = e.target.dataset.pick; if (!k) return;
+  e.target.checked ? picked.add(k) : picked.delete(k);
+});
+$("match-results").addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  try {
+    if (b.dataset.mact) {
+      await api("/api/run", {method: "POST", body: JSON.stringify({mode: b.dataset.mact, input: b.dataset.url, fits: {[b.dataset.url]: +b.dataset.score}})});
+      b.textContent = b.dataset.mact === "tailor" ? "Tailoring…" : "Tracking…"; b.disabled = true; await refreshJobs();
+    } else if (b.dataset.combine) {
+      const sr = searches.find(x => x.id === +b.dataset.combine);
+      const chosen = (sr.results || []).filter(r => picked.has(`${sr.id}|${r.url}`));
+      if (chosen.length < 2 || chosen.length > 5) return alert("Tick 2 to 5 roles in this search first.");
+      const fits = Object.fromEntries(chosen.map(r => [r.url, r.score]));
+      await api("/api/run", {method: "POST", body: JSON.stringify({mode: "combined", input: chosen.map(r => r.url).join("\n"), fits})});
+      chosen.forEach(r => picked.delete(`${sr.id}|${r.url}`)); renderMatches(); await refreshJobs();
+    } else if (b.dataset.rerun) {
+      $("m-careers").value = b.dataset.rerun; $("m-careers").focus();
+    } else if (b.dataset.delsearch && confirm("Delete this saved search? Jobs already in the tracker are not affected.")) {
+      await api(`/api/matches/${b.dataset.delsearch}`, {method: "DELETE"}); if (openSearch === +b.dataset.delsearch) openSearch = null; loadMatches();
+    }
+  } catch (err) { alert(err.message); }
+});
+
+$("btn-manual-toggle").onclick = () => { $("manual").hidden = !$("manual").hidden; };
+$("btn-manual-add").onclick = async () => {
+  const body = {company: $("m-company").value, role: $("m-role").value, location: $("m-location").value,
+                url: $("m-url").value, status: $("m-status").value};
+  try { await api("/api/applications", {method: "POST", body: JSON.stringify(body)});
+        ["m-company", "m-role", "m-location", "m-url"].forEach(id => $(id).value = ""); loadApps(); }
+  catch (err) { alert(err.message); }
+};
+
+// --- application questions (tailored jobs only)
+const drafts = {}, qaMode = {}, editing = new Set(), revising = new Set();
+const dv = (k) => esc(drafts[k] ?? "");
+const wc = (t) => (t.trim().match(/\S+/g) || []).length;
+
+function qaSection(a) {
+  const busy = jobs.some(j => j.mode === "answer" && j.record_id === a.id && (j.status === "running" || j.status === "queued"));
+  const mode = qaMode[a.id] || "one";
+  const items = (a.qa || []).map(x => {
+    const k = `${a.id}:${x.id}`;
+    const body = editing.has(k)
+      ? `<textarea data-draft="edit:${k}">${esc(drafts["edit:" + k] ?? x.a)}</textarea>
+         <div class="row"><button data-act="save" class="primary">Save</button><button data-act="cancel-edit" class="link">Cancel</button></div>`
+      : `<div class="a">${esc(x.a)}</div>`;
+    const rev = revising.has(k)
+      ? `<div class="row ask-one"><input data-draft="rev:${k}" value="${dv("rev:" + k)}" placeholder="How should it change? e.g. shorter, lead with the Kafka migration">
+         <button data-act="revise">Rewrite</button></div>` : "";
+    const hist = (x.history || []).length
+      ? `<details><summary>Earlier versions (${x.history.length})</summary>${x.history.slice().reverse().map(h => `<pre>${esc(h.a)}</pre>`).join("")}</details>` : "";
+    return `<div class="qa" data-rec="${a.id}" data-qa="${x.id}">
+      <div class="q">${esc(x.q)}</div>${body}
+      <div class="meta">${wc(x.a)} words · ${x.a.length} characters · ${esc((x.updated || "").replace("T", " ").slice(0, 16))}</div>
+      ${editing.has(k) ? "" : `<div class="row"><button data-act="copy">Copy</button><button data-act="edit" class="link">Edit</button>
+        <button data-act="revise-toggle" class="link">${revising.has(k) ? "Close" : "Revise"}</button><button data-act="del-qa" class="link danger">Delete</button></div>`}
+      ${rev}${hist}</div>`;
+  }).join("");
+  const input = mode === "one"
+    ? `<div class="ask-one"><input data-draft="one:${a.id}" value="${dv("one:" + a.id)}" placeholder="Paste an application question">
+       <button class="primary" data-act="ask">Answer</button></div>`
+    : `<textarea data-draft="many:${a.id}" placeholder="Paste several questions, one per line (or separated by blank lines)">${dv("many:" + a.id)}</textarea>
+       <div class="row"><button class="primary" data-act="ask">Answer all</button></div>`;
+  return `<div class="qa-wrap" data-rec="${a.id}">
+    <h3>Application questions</h3>${items}
+    <div class="seg"><button data-mode="one" class="${mode === "one" ? "on" : ""}">One question</button><button data-mode="many" class="${mode === "many" ? "on" : ""}">Several at once</button></div>
+    ${input}
+    ${busy ? `<div class="row busy">Writing answers… (progress is under Runs at the top). You can keep adding questions.</div>` : ""}
+  </div>`;
+}
+
+function splitQuestions(text) {
+  const parts = /\n\s*\n/.test(text.trim()) ? text.split(/\n\s*\n/) : text.split("\n");
+  return parts.map(q => q.replace(/\s+/g, " ").trim().replace(/^(\d+[.)]|[-*•])\s+/, "").replace(/^`(.*)`[,;]?$/, "$1").trim())
+              .filter(Boolean);
+}
+
+async function runQA(path, body) {
+  try { await api(path, {method: "POST", body: JSON.stringify(body)}); await refreshJobs(); render(); return true; }
+  catch (err) { alert(err.message); return false; }
+}
+
+$("rows").addEventListener("input", e => { const k = e.target.dataset.draft; if (k) drafts[k] = e.target.value; });
+$("rows").addEventListener("keydown", e => {
+  if (e.key === "Enter" && e.target.dataset.draft?.startsWith("one:")) e.target.closest(".qa-wrap").querySelector('[data-act="ask"]').click();
+});
+$("rows").addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  const wrap = b.closest("[data-rec]"); if (!wrap) return;
+  const rec = +wrap.dataset.rec, qaEl = b.closest(".qa"), qid = qaEl ? +qaEl.dataset.qa : null, k = `${rec}:${qid}`;
+  if (b.dataset.mode) { qaMode[rec] = b.dataset.mode; return render(); }
+  const act = b.dataset.act; if (!act) return;
+  const app = apps.find(a => a.id === rec), item = app?.qa?.find(x => x.id === qid);
+  if (act === "ask") {
+    const mode = qaMode[rec] || "one", key = `${mode}:${rec}`;
+    const qs = mode === "one" ? [(drafts[key] || "").trim()].filter(Boolean) : splitQuestions(drafts[key] || "");
+    if (!qs.length) return alert("Type a question first.");
+    if (await runQA(`/api/applications/${rec}/qa`, {questions: qs})) { delete drafts[key]; render(); }
+  } else if (act === "copy") {
+    await navigator.clipboard.writeText(item.a); b.textContent = "Copied"; setTimeout(() => b.textContent = "Copy", 1200);
+  } else if (act === "edit") { editing.add(k); render();
+  } else if (act === "cancel-edit") { editing.delete(k); delete drafts["edit:" + k]; render();
+  } else if (act === "save") {
+    try { await api(`/api/applications/${rec}/qa/${qid}`, {method: "PATCH", body: JSON.stringify({answer: drafts["edit:" + k] ?? item.a})});
+          editing.delete(k); delete drafts["edit:" + k]; loadApps(); } catch (err) { alert(err.message); }
+  } else if (act === "revise-toggle") { revising.has(k) ? revising.delete(k) : revising.add(k); render();
+  } else if (act === "revise") {
+    if (await runQA(`/api/applications/${rec}/qa/${qid}/revise`, {instruction: drafts["rev:" + k] || ""})) {
+      revising.delete(k); delete drafts["rev:" + k]; render();
+    }
+  } else if (act === "del-qa" && confirm("Delete this question and answer?")) {
+    await api(`/api/applications/${rec}/qa/${qid}`, {method: "DELETE"}); loadApps();
+  }
+});
+
+// --- tabs
+function showTab(name) {
+  document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === name));
+  $("tab-apps").hidden = name !== "apps"; $("tab-outreach").hidden = name !== "outreach";
+  if (name === "outreach") loadOutreach();
+  history.replaceState(null, "", name === "apps" ? location.pathname : "#" + name);
+}
+document.querySelector(".tabs").addEventListener("click", e => { const t = e.target.dataset.tab; if (t) showTab(t); });
+
+// --- cold email (outreach.json via tools/outreach.py)
+let campaigns = [], oSetup = null;
+const oDrafts = {}, oPicked = new Set(), oOpen = new Set();
+let oNewest = null;
+const SETUP_CMD = {gmail: `security add-generic-password -s resume-tailor-gmail -a "$USER" -w`,
+                   hunter: `security add-generic-password -s resume-tailor-hunter -a "$USER" -w`};
+
+async function loadOutreach() {
+  try { const d = await api("/api/outreach"); campaigns = d.campaigns; oSetup = d.setup; $("btn-outreach").disabled = !d.claude; }
+  catch { return; }
+  renderOutreach();
+}
+
+function renderOutreach() {
+  const s = oSetup;
+  const line = (ok, label, fix) => `<div><span class="${ok ? "ok" : "no"}">${ok ? "✓" : "✗"}</span> ${label}${ok ? "" : ` · ${fix}`}</div>`;
+  $("o-setup").innerHTML = [
+    line(s.gmail, `Gmail app password for ${esc(s.sender)}`, `run <code>${esc(SETUP_CMD.gmail)}</code> and paste the 16-letter app password`),
+    line(s.hunter, "Hunter.io API key", `run <code>${esc(SETUP_CMD.hunter)}</code> and paste the key`),
+    line(s.resume, `Resume to attach: ${esc(s.resume_path)}`, "file not found"),
+    `<div class="muted">Sent today: ${s.sent_today} of ${s.daily_cap} (daily cap)</div>`].join("");
+  const all = campaigns.flatMap(c => c.emails);
+  $("o-summary").textContent = all.length ? `${all.filter(e => e.status === "sent").length} sent · ${all.filter(e => e.status !== "sent").length} to review` : "";
+  if (!campaigns.length) { $("o-list").innerHTML = `<div class="empty">No emails yet. Type a company above.</div>`; return; }
+  const newest = campaigns[campaigns.length - 1].id;
+  if (newest !== oNewest) { oOpen.add("c" + newest); oNewest = newest; }  // a new company opens itself; its emails stay collapsed
+  $("o-list").innerHTML = campaigns.slice().reverse().map(c => {
+    const mails = c.emails.map(e => {
+      const k = `${c.id}.${e.id}`, sent = e.status === "sent";
+      const subj = oDrafts["s" + k] ?? e.subject, body = oDrafts["b" + k] ?? e.body, dirty = subj !== e.subject || body !== e.body;
+      return `<div class="mail" data-c="${c.id}" data-e="${e.id}">
+        ${sent ? "" : `<input type="checkbox" data-opick="${k}" ${oPicked.has(k) ? "checked" : ""} title="Pick to send">`}
+        <details data-open="m${k}" ${oOpen.has("m" + k) ? "open" : ""}>
+        <summary><b>${esc(e.name || e.email)}</b><span class="muted">${esc(e.title)}</span>
+          <span class="pill ${e.status}">${{draft: "Draft", gmail_draft: "In Gmail Drafts", sent: "Sent", failed: "Failed"}[e.status]}</span>
+          <span class="subj-line">${esc(subj)}</span></summary>
+        <div class="meta">&lt;${esc(e.email)}&gt; · ${esc(e.verification || "")}</div>
+        <input class="subj" data-odraft="s${k}" value="${esc(subj)}" ${sent ? "disabled" : ""}>
+        <textarea data-odraft="b${k}" ${sent ? "disabled" : ""}>${esc(body)}</textarea>
+        <div class="meta">${wc(body)} words · signature and resume (${esc(oSetup.attach_name)}) are added when it's built${e.sent_at ? ` · sent ${esc(e.sent_at.replace("T", " ").slice(0, 16))}` : ""}</div>
+        ${e.error ? `<div class="err">${esc(e.error)}</div>` : ""}
+        ${sent ? "" : `<div class="row">${dirty ? `<button class="primary" data-oact="save">Save edits</button><button class="link" data-oact="revert">Revert</button>` : ""}
+          <button data-oact="draft" ${dirty || !s.gmail ? "disabled" : ""} title="${s.gmail ? "Puts it in Gmail Drafts so you can see exactly how it looks" : "Set up the Gmail app password first"}">Save to Gmail Drafts</button>
+          <button class="link danger" data-oact="del">Remove</button></div>`}
+        </details>
+      </div>`;
+    }).join("");
+    const unsent = c.emails.filter(e => e.status !== "sent").length, sentN = c.emails.length - unsent;
+    return `<details class="camp" data-c="${c.id}" data-open="c${c.id}" ${oOpen.has("c" + c.id) ? "open" : ""}>
+      <summary><b>${esc(c.company)}</b> <span class="muted">${c.emails.length} emails${sentN ? ` · ${sentN} sent` : ""}${unsent ? ` · ${unsent} to review` : ""}
+        · ${esc(c.domain || "")} · ${esc(c.date.replace("T", " ").slice(0, 16))}</span></summary>
+      ${c.angle ? `<div class="muted" style="font-size:13px">Angle: ${esc(c.angle)}</div>` : ""}
+      ${mails}
+      <div class="row">${unsent ? `<button class="primary" data-oact="send" ${s.gmail ? "" : "disabled"}>Send selected</button>` : ""}
+        <button class="link danger" data-oact="delcamp">Delete ${esc(c.company)}</button></div>
+    </details>`;
+  }).join("");
+}
+
+$("btn-outreach").onclick = async () => {
+  try { await api("/api/outreach", {method: "POST", body: JSON.stringify({company: $("o-company").value, apollo: $("o-apollo").checked})}); $("o-company").value = ""; await refreshJobs(); }
+  catch (err) { alert(err.message); }
+};
+$("o-company").addEventListener("keydown", e => { if (e.key === "Enter") $("btn-outreach").click(); });
+$("o-list").addEventListener("input", e => {
+  const k = e.target.dataset.odraft; if (!k) return;
+  oDrafts[k] = e.target.value;
+  const m = e.target.closest(".mail"), was = m.querySelector('[data-oact="save"]') !== null;
+  const c = campaigns.find(x => x.id === +m.dataset.c), it = c.emails.find(x => x.id === +m.dataset.e), kk = `${c.id}.${it.id}`;
+  const dirty = (oDrafts["s" + kk] ?? it.subject) !== it.subject || (oDrafts["b" + kk] ?? it.body) !== it.body;
+  if (dirty !== was) { const pos = [e.target.selectionStart, e.target.selectionEnd]; renderOutreach();
+    const el = document.querySelector(`[data-odraft="${k}"]`); el.focus(); el.setSelectionRange(...pos); }
+  else m.querySelectorAll(".meta")[1].firstChild.textContent = `${wc(oDrafts["b" + kk] ?? it.body)} words · signature and resume (${esc(oSetup.attach_name)}) are added when it's built`;
+});
+$("o-list").addEventListener("toggle", e => {
+  const k = e.target.dataset?.open; if (k) e.target.open ? oOpen.add(k) : oOpen.delete(k);
+}, true);
+$("o-list").addEventListener("change", e => { const k = e.target.dataset.opick; if (k) e.target.checked ? oPicked.add(k) : oPicked.delete(k); });
+$("o-list").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-oact]"); if (!b) return;
+  const act = b.dataset.oact, cEl = b.closest("[data-c]"), cid = +cEl.dataset.c, m = b.closest(".mail"), eid = m ? +m.dataset.e : null;
+  const camp = campaigns.find(x => x.id === cid), k = `${cid}.${eid}`;
+  try {
+    if (act === "save") {
+      const it = camp.emails.find(x => x.id === eid);
+      await api(`/api/outreach/${cid}/${eid}`, {method: "PATCH", body: JSON.stringify({subject: oDrafts["s" + k] ?? it.subject, body: oDrafts["b" + k] ?? it.body})});
+      delete oDrafts["s" + k]; delete oDrafts["b" + k]; await loadOutreach();
+    } else if (act === "revert") { delete oDrafts["s" + k]; delete oDrafts["b" + k]; renderOutreach();
+    } else if (act === "draft") {
+      b.disabled = true; b.textContent = "Saving…";
+      await api(`/api/outreach/${cid}/${eid}/draft`, {method: "POST"}); await loadOutreach();
+    } else if (act === "del" && confirm("Remove this email?")) {
+      await api(`/api/outreach/${cid}/${eid}`, {method: "DELETE"}); await loadOutreach();
+    } else if (act === "delcamp" && confirm(`Delete all emails for ${camp.company}? Sent emails are forgotten too, so they could be emailed again.`)) {
+      await api(`/api/outreach/${cid}`, {method: "DELETE"}); await loadOutreach();
+    } else if (act === "send") {
+      const ids = camp.emails.filter(x => oPicked.has(`${cid}.${x.id}`) && x.status !== "sent").map(x => x.id);
+      if (!ids.length) return alert("Tick the emails to send first.");
+      if (camp.emails.some(x => ids.includes(x.id) && (oDrafts[`s${cid}.${x.id}`] !== undefined || oDrafts[`b${cid}.${x.id}`] !== undefined)))
+        return alert("Save or revert your edits first.");
+      const who = camp.emails.filter(x => ids.includes(x.id)).map(x => `• ${x.name} <${x.email}>`).join("\n");
+      if (!confirm(`Send ${ids.length} email(s) from your Gmail now?\n\n${who}\n\nThey go out one at a time, 20–45 s apart.`)) return;
+      await api(`/api/outreach/${cid}/send`, {method: "POST", body: JSON.stringify({ids})});
+      ids.forEach(id => oPicked.delete(`${cid}.${id}`)); await refreshJobs();
+    }
+  } catch (err) { alert(err.message); await loadOutreach(); }
+});
+
+// --- Claude Code runs (queued; the server runs a few at a time)
+const showLog = new Set(), hideResult = new Set();
+const TITLES = {tailor: "Tailor", track: "Track", answer: "Answer", "tailor-combined": "Combined", autofill: "Prefill", match: "Match", "score-jobs": "Score",
+                outreach: "Cold email", "send-emails": "Send"};
+const LABEL = {queued: "Queued", running: "Running…", done: "Done", failed: "Failed", cancelled: "Cancelled"};
+const active = (j) => j.status === "queued" || j.status === "running";
+
+async function startRun(mode) {
+  try {
+    const res = await api("/api/run", {method: "POST", body: JSON.stringify({mode, input: $("jd").value})});
+    $("jd").value = ""; await refreshJobs();
+    if (res.jobs.length > 1) $("runs-summary").textContent += ` · ${res.jobs.length} added`;
+  } catch (err) { alert(err.message); }
+}
+$("btn-tailor").onclick = () => startRun("tailor");
+$("btn-track").onclick = () => startRun("track");
+$("btn-combined").onclick = () => startRun("combined");
+$("btn-clear").onclick = async () => { await api("/api/jobs/clear", {method: "POST"}); refreshJobs(); };
+
+function elapsed(j) {
+  if (j.status === "queued") return "waiting";
+  if (!j.started) return "";
+  const secs = Math.round((j.finished || Date.now() / 1000) - j.started);
+  return `${Math.floor(secs / 60)}m ${secs % 60}s` + (j.cost ? ` · $${j.cost.toFixed(2)}` : "");
+}
+
+function renderRuns() {
+  $("runs").hidden = !jobs.length;
+  const n = (s) => jobs.filter(j => j.status === s).length;
+  $("runs-summary").textContent = [n("running") && `${n("running")} running`, n("queued") && `${n("queued")} queued`]
+    .filter(Boolean).join(" · ");
+  const scroll = {};
+  document.querySelectorAll("#run-list .log").forEach(el => {
+    scroll[el.dataset.job] = el.scrollTop + el.clientHeight >= el.scrollHeight - 4 ? Infinity : el.scrollTop;
+  });
+  $("run-list").innerHTML = jobs.slice().reverse().map(j => {
+    const last = j.log.filter(e => e.kind !== "raw").slice(-1)[0];
+    const logHtml = j.log.map(e => `<div class="${e.kind}">${e.kind === "tool" ? "→ " : e.kind === "error" ? "! " : ""}${esc(e.text)}</div>`).join("");
+    const finished = !active(j);
+    return `<div class="run" data-job="${j.id}">
+      <div class="run-head"><span class="pill ${j.status}">${LABEL[j.status]}</span><b>${TITLES[j.mode] || j.mode}</b>
+        <span class="preview muted" title="${esc(j.preview)}">${esc(j.preview)}</span><span class="muted">${elapsed(j)}</span>
+        ${j.log.length ? `<button class="link" data-jact="log">${showLog.has(j.id) ? "Hide log" : "Log"}</button>` : ""}
+        ${j.result ? `<button class="link" data-jact="result">${hideResult.has(j.id) ? "Show result" : "Hide result"}</button>` : ""}
+        ${active(j) ? `<button class="link danger" data-jact="cancel">Cancel</button>` : ""}</div>
+      ${(j.saved || []).length ? `<div class="saved">${j.saved.map(t => { const m = t.match(/#(\d+)/); const id = m && (/^(Added|Updated)/.test(t) ? m[1] : (t.match(/on #(\d+)/) || [])[1]);
+          return id ? `<button class="link" data-show="${id}">${esc(t)}</button>` : esc(t); }).join(" · ")}</div>` : ""}
+      ${j.mode === "autofill" ? j.log.filter(e => e.kind === "needs").map(e => `<div class="needs">${esc(e.text)}</div>`).join("") : ""}
+      ${j.status === "running" && last && !showLog.has(j.id) ? `<div class="last">${esc((last.kind === "tool" ? "→ " : "") + last.text)}</div>` : ""}
+      ${showLog.has(j.id) ? `<div class="log" data-job="${j.id}">${logHtml}</div>` : ""}
+      ${finished && j.result && !hideResult.has(j.id) ? `<div class="result md">${md(j.result)}</div>` : ""}
+    </div>`;
+  }).join("");
+  document.querySelectorAll("#run-list .log").forEach(el => {
+    const s = scroll[el.dataset.job]; el.scrollTop = s === undefined || s === Infinity ? el.scrollHeight : s;
+  });
+}
+
+$("run-list").addEventListener("click", async e => {
+  const show = e.target.closest("button[data-show]");
+  if (show) {  // jump to that job in the table
+    const id = +show.dataset.show; $("search").value = ""; $("filter").value = ""; open.add(id); render();
+    const btn = [...document.querySelectorAll("#rows [data-toggle]")].find(x => +x.dataset.toggle === id);
+    if (btn) { const tr = btn.closest("tr"); tr.scrollIntoView({behavior: "smooth", block: "center"});
+               tr.style.outline = "2px solid var(--accent)"; setTimeout(() => tr.style.outline = "", 2500); }
+    return;
+  }
+  const b = e.target.closest("button[data-jact]"); if (!b) return;
+  const id = b.closest(".run").dataset.job, act = b.dataset.jact;
+  if (act === "log") { showLog.has(id) ? showLog.delete(id) : showLog.add(id); renderRuns(); }
+  if (act === "result") { hideResult.has(id) ? hideResult.delete(id) : hideResult.add(id); renderRuns(); }
+  if (act === "cancel") { await api(`/api/jobs/${id}/cancel`, {method: "POST"}); setTimeout(refreshJobs, 300); }
+});
+
+async function refreshJobs() {
+  let data;
+  try { data = await api("/api/jobs"); } catch { return; }
+  const before = new Map(jobs.map(j => [j.id, j.status]));
+  const savedBefore = new Map(jobs.map(j => [j.id, (j.saved || []).length]));
+  jobs = data.jobs;
+  const justFinished = jobs.some(j => (!active(j) && before.has(j.id) && before.get(j.id) !== j.status)
+    || (j.saved || []).length > (savedBefore.get(j.id) || 0));
+  renderRuns();
+  if (justFinished) loadApps();
+  const busy = jobs.some(active);
+  if (busy && !pollTimer) pollTimer = setInterval(refreshJobs, 1500);
+  if (!busy && pollTimer) { clearInterval(pollTimer); pollTimer = null; loadApps(); }
+}
+
+$("daily").addEventListener("click", e => { if (e.target.closest("[data-recheck]")) loadInboxDaily(); });
+setInterval(() => { if (!document.hidden) loadInboxDaily(); }, 2 * 60 * 1000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) loadInboxDaily(); });
+(async () => { loadInboxDaily(); await loadApps(); await refreshJobs(); if (location.hash === "#outreach") showTab("outreach"); })();
+</script>
+</body>
+</html>

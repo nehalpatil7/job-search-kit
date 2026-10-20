@@ -1,0 +1,15 @@
+{
+  "name": "resume-tailor-autofill",
+  "private": true,
+  "description": "Prefills job applications from the tracker in a visible Chrome window. Never submits.",
+  "main": "autofill.js",
+  "scripts": {
+    "autofill": "node autofill.js"
+  },
+  "dependencies": {
+    "puppeteer": "^25.14.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

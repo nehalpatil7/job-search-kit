@@ -1,0 +1,17 @@
+# personal data: stays on your machine
+tracker.json
+matches.json
+outreach.json
+resumes/
+# scratch and locks
+.work/
+.jd-input.md
+.qa-input.json
+.tracker.lock
+.outreach.lock
+*.json.tmp
+__pycache__/
+.DS_Store
+# prefill browser
+tools/apply/node_modules/
+tools/apply/.chrome-profile/

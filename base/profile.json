@@ -1,0 +1,40 @@
+{
+  "_note": "Your details. Used for PDF file names, the cold-email signature, job-location filters, the Gmail counters and the application prefill script (tools/apply/autofill.js). Leave a value null to answer it yourself each time; null fields are never guessed. \"learned\" fills itself from answers you type into forms.",
+  "firstName": "Jordan",
+  "middleName": null,
+  "lastName": "Lee",
+  "fullName": "Jordan Lee",
+  "preferredName": "Jordan",
+  "email": "jordan.lee@example.com",
+  "phone": "555-555-0123",
+  "location": "Denver, CO",
+  "city": "Denver",
+  "state": "Colorado",
+  "stateCode": "CO",
+  "country": "United States",
+  "linkedin": "https://linkedin.com/in/example",
+  "github": "https://github.com/example",
+  "portfolio": null,
+  "currentTitle": "Software Engineer",
+  "currentCompany": "Example Corp",
+  "searchStart": "2026-10-01",
+  "coldEmailResume": null,
+  "education": [
+    {
+      "school": "Example State University",
+      "degree": "Bachelor of Science",
+      "field": "Computer Science",
+      "start": "2016-08",
+      "end": "2020-05"
+    }
+  ],
+  "openToRemote": true,
+  "willingToRelocate": null,
+  "workAuthorizedUS": null,
+  "requiresSponsorship": null,
+  "earliestStartDate": null,
+  "noticePeriod": null,
+  "salaryExpectation": null,
+  "howDidYouHear": null,
+  "learned": []
+}
