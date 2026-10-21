@@ -237,17 +237,20 @@
   <div id="tab-outreach" hidden>
     <section class="panel">
       <h2>Cold email recruiters</h2>
-      <div class="ask-one">
-        <input id="o-company" placeholder="Company name or domain, e.g. Stripe or stripe.com">
-        <button class="primary" id="btn-outreach">Find recruiters + write emails</button>
-      </div>
-      <div class="checks muted">
-        <label title="Only when Hunter is out of searches or finds no recruiters. Apollo's free plan blocks people search, so this needs a paid plan."><input type="checkbox" id="o-apollo"> Use Apollo as a fallback (up to 5 Apollo credits; needs a paid Apollo plan)</label>
-        <span>Finds the top 5 recruiters (Hunter.io, 1 search) and writes a short personalized email to each, with your resume attached. Nothing is sent until you press Send.</span></div>
+      <input id="o-company" placeholder="Company, e.g. Stripe or stripe.com">
+      <textarea id="o-recipients" style="margin-top:8px" placeholder="Recipients, one per line (up to 20). Name and title are optional, in any order:
+Jane Doe, Senior Technical Recruiter <jane.doe@acme.com>
+Priya Shah | University Recruiter | priya@acme.com
+sam.lee@acme.com"></textarea>
+      <div class="row"><button class="primary" id="btn-outreach">Write emails</button>
+        <span class="muted">Claude reads up on the company and writes a short personalized email to each person, with your resume attached. Nothing is sent until you press Send. Anyone you've already emailed is skipped.</span></div>
       <details style="margin-top:10px"><summary>Setup</summary><div class="setup" id="o-setup"></div></details>
     </section>
     <section class="panel">
-      <h2>Emails <span class="muted" id="o-summary" style="font-weight:400"></span></h2>
+      <div class="row" style="margin-top:0; justify-content: space-between;">
+        <h2 style="margin:0">Emails <span class="muted" id="o-summary" style="font-weight:400"></span></h2>
+        <span><span class="muted" id="o-sync" style="font-size:12px"></span> <button class="link" id="btn-osync" title="Pull edits made in Gmail Drafts, and drafts sent or deleted there">Sync with Gmail</button></span>
+      </div>
       <div id="o-list"></div>
     </section>
   </div>
@@ -599,7 +602,7 @@ $("rows").addEventListener("click", async e => {
 function showTab(name) {
   document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === name));
   $("tab-apps").hidden = name !== "apps"; $("tab-outreach").hidden = name !== "outreach";
-  if (name === "outreach") loadOutreach();
+  if (name === "outreach") loadOutreach(true);
   history.replaceState(null, "", name === "apps" ? location.pathname : "#" + name);
 }
 document.querySelector(".tabs").addEventListener("click", e => { const t = e.target.dataset.tab; if (t) showTab(t); });
@@ -611,9 +614,14 @@ let oNewest = null;
 const SETUP_CMD = {gmail: `security add-generic-password -s resume-tailor-gmail -a "$USER" -w`,
                    hunter: `security add-generic-password -s resume-tailor-hunter -a "$USER" -w`};
 
-async function loadOutreach() {
-  try { const d = await api("/api/outreach"); campaigns = d.campaigns; oSetup = d.setup; $("btn-outreach").disabled = !d.claude; }
-  catch { return; }
+let oSync = "";
+async function loadOutreach(sync) {  // sync: first pull what changed in Gmail Drafts (edits, sends, deletions)
+  if (sync) $("o-sync").textContent = "Syncing with Gmail…";
+  try {
+    const d = await api("/api/outreach" + (sync ? "?sync=1" : "")); campaigns = d.campaigns; oSetup = d.setup; $("btn-outreach").disabled = !d.claude;
+    if (sync) oSync = d.sync_error || `Synced with Gmail ${new Date().toTimeString().slice(0, 5)}` + (d.synced.length ? ` · ${d.synced.join(" · ")}` : "");
+  } catch (err) { if (sync) oSync = err.message; }
+  $("o-sync").textContent = oSync;
   renderOutreach();
 }
 
@@ -622,7 +630,7 @@ function renderOutreach() {
   const line = (ok, label, fix) => `<div><span class="${ok ? "ok" : "no"}">${ok ? "✓" : "✗"}</span> ${label}${ok ? "" : ` · ${fix}`}</div>`;
   $("o-setup").innerHTML = [
     line(s.gmail, `Gmail app password for ${esc(s.sender)}`, `run <code>${esc(SETUP_CMD.gmail)}</code> and paste the 16-letter app password`),
-    line(s.hunter, "Hunter.io API key", `run <code>${esc(SETUP_CMD.hunter)}</code> and paste the key`),
+    line(s.hunter, "Hunter.io API key (optional: only for /outreach in the terminal without recipients)", `run <code>${esc(SETUP_CMD.hunter)}</code> and paste the key`),
     line(s.resume, `Resume to attach: ${esc(s.resume_path)}`, "file not found"),
     `<div class="muted">Sent today: ${s.sent_today} of ${s.daily_cap} (daily cap)</div>`].join("");
   const all = campaigns.flatMap(c => c.emails);
@@ -646,7 +654,8 @@ function renderOutreach() {
         <div class="meta">${wc(body)} words · signature and resume (${esc(oSetup.attach_name)}) are added when it's built${e.sent_at ? ` · sent ${esc(e.sent_at.replace("T", " ").slice(0, 16))}` : ""}</div>
         ${e.error ? `<div class="err">${esc(e.error)}</div>` : ""}
         ${sent ? "" : `<div class="row">${dirty ? `<button class="primary" data-oact="save">Save edits</button><button class="link" data-oact="revert">Revert</button>` : ""}
-          <button data-oact="draft" ${dirty || !s.gmail ? "disabled" : ""} title="${s.gmail ? "Puts it in Gmail Drafts so you can see exactly how it looks" : "Set up the Gmail app password first"}">Save to Gmail Drafts</button>
+          ${e.status === "gmail_draft" ? `<span class="muted" style="font-size:12px">Edit here or in Gmail: Send sends the Gmail draft</span>`
+            : `<button data-oact="draft" ${dirty || !s.gmail ? "disabled" : ""} title="${s.gmail ? "Puts it in Gmail Drafts, where you can also edit it; Send then sends that draft" : "Set up the Gmail app password first"}">Save to Gmail Drafts</button>`}
           <button class="link danger" data-oact="del">Remove</button></div>`}
         </details>
       </div>`;
@@ -663,11 +672,28 @@ function renderOutreach() {
   }).join("");
 }
 
+$("btn-osync").onclick = () => loadOutreach(true);
 $("btn-outreach").onclick = async () => {
-  try { await api("/api/outreach", {method: "POST", body: JSON.stringify({company: $("o-company").value, apollo: $("o-apollo").checked})}); $("o-company").value = ""; await refreshJobs(); }
+  if (!$("o-recipients").value.trim()) return alert("Paste at least one recipient's email address.");
+  try { await api("/api/outreach", {method: "POST", body: JSON.stringify({company: $("o-company").value, recipients: $("o-recipients").value})});
+        $("o-company").value = ""; $("o-recipients").value = ""; await refreshJobs(); }
   catch (err) { alert(err.message); }
 };
-$("o-company").addEventListener("keydown", e => { if (e.key === "Enter") $("btn-outreach").click(); });
+$("o-company").addEventListener("keydown", e => { if (e.key === "Enter") $("o-recipients").focus(); });
+
+// pasting one link / one recipient puts it on its own line and leaves the cursor on a fresh one, so the next paste needs no Enter
+function pasteOnOwnLine(el, isItem) {
+  el.addEventListener("paste", e => {
+    const text = (e.clipboardData || window.clipboardData).getData("text").trim();
+    if (!text || text.includes("\n") || !isItem(text)) return;   // anything else (e.g. a whole job description) pastes as usual
+    e.preventDefault();
+    const start = el.selectionStart, end = el.selectionEnd, before = el.value.slice(0, start), after = el.value.slice(end);
+    el.setRangeText((before && !before.endsWith("\n") ? "\n" : "") + text + (after.startsWith("\n") ? "" : "\n"), start, end, "end");
+    el.dispatchEvent(new Event("input", {bubbles: true}));
+  });
+}
+pasteOnOwnLine($("jd"), t => /^https?:\/\/\S+$/.test(t));
+pasteOnOwnLine($("o-recipients"), t => /[^\s@]+@[^\s@]+\.[a-z]{2,}/i.test(t));
 $("o-list").addEventListener("input", e => {
   const k = e.target.dataset.odraft; if (!k) return;
   oDrafts[k] = e.target.value;

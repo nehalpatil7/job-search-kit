@@ -8,7 +8,7 @@ Tailors one LaTeX resume to job descriptions and tracks applications.
 - `/score-jobs`: give tracker jobs without a fit score a real one.
 - `/answer <record id> <question>`: answer a job-application question for any tracked job (saved in the tracker).
 - `/sync-gmail [ids file]`: import Gmail application-confirmation emails into the tracker (links tracked jobs, adds untracked ones).
-- `/outreach <company>`: find the top 5 recruiters at a company and write a short cold email to each (saved in outreach.json for review; never sent by Claude).
+- `/outreach <company> --recipients <file>`: write a short cold email to each recipient the user lists (without a list: the top 5 recruiters found on Hunter.io); saved in outreach.json for review, never sent by Claude.
 
 ## Layout
 - `base/resume.tex`: the master resume. Read-only (a hook blocks edits). Its styling and one-page format must never change.

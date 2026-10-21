@@ -45,7 +45,7 @@ ALLOWED_TOOLS = ",".join([
     "Bash(mkdir *)", "Bash(cp *)", "Bash(rm -rf .work/*)",
     "Bash(python3 tools/check_resume.py *)", "Bash(python3 tools/tracker.py *)", "Bash(python3 tools/careers.py *)",
     # runs may find recruiters and save drafts, never send: sending is a button the user presses
-    "Bash(python3 tools/outreach.py find *)", "Bash(python3 tools/outreach.py add *)",
+    "Bash(python3 tools/outreach.py contacts *)", "Bash(python3 tools/outreach.py find *)", "Bash(python3 tools/outreach.py add *)",
     "Bash(python3 tools/outreach.py import-contacts *)", "Bash(python3 tools/inbox.py pending *)",
     # Apollo fallback for /outreach: free people search + email reveal (1 credit each, capped by the skill and outreach.py)
     "mcp__claude_ai_Apollo_io__apollo_mixed_people_api_search", "mcp__claude_ai_Apollo_io__apollo_people_bulk_match",
@@ -372,13 +372,27 @@ def start_answer(rec_id, questions=None, revise=None):
     return enqueue(job, "qa-input.json", json.dumps(payload, ensure_ascii=False))
 
 
-def start_outreach(company, apollo=False):
+def start_outreach(company, recipients="", apollo=False):
+    """Write cold emails to the recipients given (one per line); without recipients, the skill sources them on Hunter."""
     require_claude()
     company = (company or "").strip()
     if not company or len(company) > 100:
-        raise ValueError("Type a company name (or its domain, like stripe.com).")
-    job = Job("outreach", company)
-    job.arg = json.dumps(company) + (" --apollo" if apollo else "")
+        raise ValueError("Type the company name (or its domain, like stripe.com).")
+    recipients = (recipients or "").strip()
+    if recipients:
+        found, problems = outreach.parse_recipients(recipients)
+        if not found:
+            raise ValueError("No email addresses found. Put one recipient per line, e.g. Jane Doe, Technical Recruiter <jane@acme.com>.")
+        if len(found) > outreach.MAX_RECIPIENTS:
+            raise ValueError(f"{len(found)} recipients; at most {outreach.MAX_RECIPIENTS} per company.")
+    job = Job("outreach", f"{company}: {len(found)} recipient(s)" if recipients else company)
+    job.work.mkdir(parents=True, exist_ok=True)
+    job.arg = json.dumps(company)
+    if recipients:
+        (job.work / "recipients.txt").write_text(recipients)
+        job.arg += f" --recipients .work/{job.id}/recipients.txt"
+    elif apollo:
+        job.arg += " --apollo"
     return enqueue(job)
 
 
@@ -560,7 +574,14 @@ class Handler(BaseHTTPRequestHandler):
             fresh = parse_qs(url.query).get("refresh") == ["1"]
             return self.send(200, applied_daily(fresh))
         if path == "/api/outreach":
-            return self.send(200, {"campaigns": outreach.load(), "setup": outreach.status(), "claude": bool(CLAUDE)})
+            synced, sync_error = [], ""
+            if parse_qs(url.query).get("sync") == ["1"]:   # pull edits made in Gmail Drafts, drafts sent or deleted there
+                try:
+                    synced = outreach.sync_drafts()
+                except Exception as exc:
+                    sync_error = f"Couldn't sync with Gmail: {exc}"[:300]
+            return self.send(200, {"campaigns": outreach.load(), "setup": outreach.status(), "claude": bool(CLAUDE),
+                                   "synced": synced, "sync_error": sync_error})
         if path == "/api/export.csv":
             out = io.StringIO()
             cols = ["id", "date_added", "company", "role", "location", "status", "date_applied", "resume", "url"]
@@ -613,7 +634,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, {"jobs": [j.view() for j in jobs]})
         if path == "/api/outreach":
             try:
-                return self.send(200, start_outreach(data.get("company"), bool(data.get("apollo"))).view())
+                return self.send(200, start_outreach(data.get("company"), data.get("recipients") or "", bool(data.get("apollo"))).view())
             except ValueError as exc:
                 return self.error(400, str(exc))
         od = re.fullmatch(r"/api/outreach/(\d+)/(\d+)/draft", path)

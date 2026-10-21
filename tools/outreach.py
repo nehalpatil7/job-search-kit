@@ -8,6 +8,8 @@ Usage:
   python3 tools/outreach.py find --company "Stripe" [--domain stripe.com] --work .work/<run> [--apollo]
         # Hunter domain search (HR department), ranks recruiters, writes the top 5 to WORK/contacts.json.
         # With --apollo, prints APOLLO_NEEDED instead of failing when Hunter is out of searches or finds nobody.
+  python3 tools/outreach.py contacts --company "Stripe" --file WORK/recipients.txt --work WORK
+        # recipients you give (one per line: "Name, Title <email>", "email, Name, Title" or just the email) -> WORK/contacts.json
   python3 tools/outreach.py import-contacts --work WORK --file WORK/apollo.json
         # merge Apollo-enriched recruiters ([{email, first_name, last_name, title, linkedin, email_status}]) into contacts.json
   python3 tools/outreach.py add --file WORK/emails.json [--clean-work WORK]
@@ -27,6 +29,7 @@ Secrets come from environment variables or the macOS Keychain:
 import argparse
 import contextlib
 import datetime as dt
+import email
 import html
 import imaplib
 import json
@@ -42,8 +45,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from email import policy
 from email.message import EmailMessage
-from email.utils import formataddr, make_msgid
+from email.utils import formataddr, getaddresses, make_msgid, parsedate_to_datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -62,7 +66,10 @@ DAILY_CAP = 25                                 # cold emails per day; keeps the 
 MAX_WORDS = 150                                # body without signature
 SEND_GAP = (20, 45)                            # seconds between sends in one batch
 DRAFTS = '"[Gmail]/Drafts"'
+TRASH = '"[Gmail]/Trash"'
+ALL_MAIL = '"[Gmail]/All Mail"'
 HUNTER = "https://api.hunter.io/v2/domain-search"
+MAX_RECIPIENTS = 20                            # per campaign when you give the addresses yourself
 APOLLO_MAX = 5                                 # Apollo credits one run may spend (fallback only)
 STATUSES = ["draft", "gmail_draft", "sent", "failed"]
 
@@ -236,6 +243,57 @@ def find(company, domain, work):
     return out
 
 
+EMAIL = re.compile(r"[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+TITLE_WORDS = re.compile(r"recruit|talent|sourc|\bhr\b|people|hiring|manager|director|engineer|partner|lead|head|coordinator", re.I)
+
+
+def parse_recipients(text):
+    """One recipient per line: an email plus, optionally, a name and a title in any order around it.
+    Returns (contacts, problems)."""
+    out, problems, seen = [], [], set()
+    for line in text.splitlines():
+        line = re.sub(r"https?://\S+", " ", line).strip()
+        if not line:
+            continue
+        m = EMAIL.search(line)
+        if not m:
+            problems.append(f"no email address in: {line[:60]}")
+            continue
+        addr = m.group(0)
+        if addr.lower() in seen:
+            continue
+        seen.add(addr.lower())
+        rest = re.sub(r"[<>()\[\]\"]", " ", line[:m.start()] + " , " + line[m.end():])
+        parts = [x.strip(" -–|:;.") for x in re.split(r"[,\t|;]| - | – ", rest)]
+        parts = [x for x in parts if x and not x.lower().startswith("mailto")]
+        name = next((x for x in parts if not TITLE_WORDS.search(x)), "")
+        title = ", ".join(x for x in parts if x != name)
+        if not name:   # "jane.doe@" or "jane_doe@" -> Jane Doe; anything else stays nameless rather than guessed
+            local = addr.split("@")[0]
+            if re.fullmatch(r"[A-Za-z]{2,}[._][A-Za-z]{2,}", local):
+                name = " ".join(w.capitalize() for w in re.split(r"[._]", local))
+        first, _, last = name.partition(" ")
+        out.append({"email": addr, "first_name": first, "last_name": last, "title": title, "linkedin": "",
+                    "verification": "provided", "confidence": None, "score": 0, "source": "manual"})
+    return out, problems
+
+
+def manual_contacts(company, file, work):
+    """Recipients given by the user, written to WORK/contacts.json in the same shape `find` writes."""
+    contacts, problems = parse_recipients(Path(file).read_text())
+    seen = contacted()
+    already = [c["email"] for c in contacts if c["email"].lower() in seen]
+    contacts = [c for c in contacts if c["email"].lower() not in seen]
+    if len(contacts) > MAX_RECIPIENTS:
+        sys.exit(f"FAILED: {len(contacts)} recipients; at most {MAX_RECIPIENTS} per company.")
+    domains = [c["email"].split("@")[1].lower() for c in contacts]
+    out = {"company": company, "domain": max(set(domains), key=domains.count) if domains else "",
+           "contacts": contacts, "found": len(contacts), "already_contacted": len(already), "hunter": "not used"}
+    Path(work).mkdir(parents=True, exist_ok=True)
+    Path(work, "contacts.json").write_text(json.dumps(out, indent=2, ensure_ascii=False))
+    return out, problems, already
+
+
 APOLLO_STATUS = {"verified": "valid", "likely to engage": "accept_all", "extrapolated": "unknown"}
 
 
@@ -362,7 +420,12 @@ def edit(cid, eid, subject=None, body=None):
             raise ValueError("; ".join(errs))
         item.update(subject=new["subject"].strip(), body=new["body"].strip(), updated=now())
         save(campaigns)
-        return item
+    if item["status"] == "gmail_draft":   # keep the Gmail draft in step: replace it with the edited version
+        try:
+            return gmail_draft(cid, eid)
+        except Exception as exc:
+            return set_status(cid, eid, error=f"Saved here, but the Gmail draft wasn't updated: {exc}"[:300])
+    return item
 
 
 def delete(cid, eid=None):
@@ -399,25 +462,34 @@ def short(url):
     return re.sub(r"^https?://(www\.)?", "", url).rstrip("/")
 
 
-BULLET = re.compile(r"^\s*[-•]\s+")
+BULLET = re.compile(r"^\s*[-•*]\s+")
 
 
 def tight(body):
     """The body without the blank line before a bullet list: the list follows its lead-in line directly."""
-    return re.sub(r"\n\s*\n(?=\s*[-•]\s)", "\n", body.strip())
+    return re.sub(r"\n\s*\n(?=\s*[-•*]\s)", "\n", body.strip())
 
 
 def to_html(body):
+    """Paragraphs as <div>s with a blank line between them; runs of "- " lines as one list, right under its lead-in."""
     out = []
     for block in re.split(r"\n\s*\n", body.strip()):
-        lines = block.splitlines()
-        if all(BULLET.match(l) for l in lines):
-            if out and out[-1] == "<div><br></div>":
-                out.pop()   # no blank line between the lead-in paragraph and its bullets
-            out.append('<ul style="margin-top:0;margin-bottom:0">'
-                       + "".join(f"<li>{html.escape(BULLET.sub('', l))}</li>" for l in lines) + "</ul><div><br></div>")
-        else:
-            out += ["<div>" + "<br>".join(html.escape(l) for l in lines) + "</div>", "<div><br></div>"]
+        runs = []   # consecutive bullet lines or text lines within the block
+        for line in block.splitlines():
+            kind = bool(BULLET.match(line))
+            if runs and runs[-1][0] == kind:
+                runs[-1][1].append(line)
+            else:
+                runs.append((kind, [line]))
+        for kind, lines in runs:
+            if kind:
+                if out and out[-1] == "<div><br></div>":
+                    out.pop()   # no blank line between the lead-in paragraph and its bullets
+                out.append('<ul style="margin-top:0;margin-bottom:0">'
+                           + "".join(f"<li>{html.escape(BULLET.sub('', l))}</li>" for l in lines) + "</ul>")
+            else:
+                out.append("<div>" + "<br>".join(html.escape(l) for l in lines) + "</div>")
+        out.append("<div><br></div>")
     return "".join(out)
 
 
@@ -447,36 +519,173 @@ def login_args():
     return profile()["email"], pw
 
 
+# ---------- Gmail drafts: once an email is in Gmail Drafts, the Gmail draft is the version that counts ----------
+
+def imap_login():
+    user, pw = login_args()
+    imap = imaplib.IMAP4_SSL("imap.gmail.com")
+    imap.login(user, pw)
+    return imap
+
+
+def find_draft(imap, item):
+    """UID (in Drafts) of this email's Gmail draft, or None. Matched by Gmail thread id, then by recipient address
+    (Gmail may save an edited draft as a new message); the newest match wins."""
+    imap.select(DRAFTS)
+    uids = []
+    if item.get("gmail_thread"):
+        typ, data = imap.uid("SEARCH", "X-GM-THRID", item["gmail_thread"])
+        uids = data[0].split() if typ == "OK" else []
+    if not uids:
+        typ, data = imap.uid("SEARCH", None, "TO", f'"{item["email"]}"')
+        uids = data[0].split() if typ == "OK" else []
+    return max(uids, key=int) if uids else None
+
+
+def fetch(imap, uid):
+    typ, res = imap.uid("FETCH", uid, "(X-GM-THRID BODY.PEEK[])")
+    part = next(r for r in res if isinstance(r, tuple))
+    thread = re.search(rb"X-GM-THRID (\d+)", part[0])
+    return email.message_from_bytes(part[1], policy=policy.default), thread.group(1).decode() if thread else ""
+
+
+def trash(imap, uid):
+    """Remove a draft from Drafts (it goes to Trash, recoverable for 30 days)."""
+    imap.uid("COPY", uid, TRASH)
+    imap.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
+    imap.expunge()
+
+
+def app_copy(msg):
+    """(subject, body) of a Gmail draft as the app shows them: plain text without the signature block."""
+    part = msg.get_body(preferencelist=("plain", "html"))
+    text = part.get_content() if part else ""
+    if part is not None and part.get_content_type() == "text/html":
+        text = html.unescape(re.sub(r"<[^>]+>", "\n", re.sub(r"(?i)<br\s*/?>", "\n", text)))
+    name = re.escape(signature()[0])
+    text = re.split(rf"\n\s*(best|thanks|regards|cheers|sincerely),?\s*\n\s*{name}\b", text, flags=re.I)[0]
+    text = re.sub(r"\n{3,}", "\n\n", text.replace("\r\n", "\n")).strip()
+    return str(msg["Subject"] or ""), text
+
+
 def gmail_draft(cid, eid):
+    """Put this email in Gmail Drafts, replacing its earlier Gmail draft if there is one."""
     camp, item = find_email(load(), cid, eid)
     if item["status"] == "sent":
         raise ValueError("Already sent.")
     msg = build(camp, item)
-    user, pw = login_args()
-    with imaplib.IMAP4_SSL("imap.gmail.com") as imap:
-        imap.login(user, pw)
+    imap = imap_login()
+    try:
+        old = find_draft(imap, item) if item["status"] == "gmail_draft" else None
         typ, data = imap.append(DRAFTS, r"(\Draft)", imaplib.Time2Internaldate(time.time()), msg.as_bytes())
         if typ != "OK":
             raise RuntimeError(f"Gmail refused the draft: {data}")
-    return set_status(cid, eid, status="gmail_draft", drafted_at=now(), error="")
+        if old:
+            trash(imap, old)
+        imap.select(DRAFTS)
+        uid = re.search(rb"APPENDUID \d+ (\d+)", data[0] or b"")
+        thread = fetch(imap, uid.group(1).decode())[1] if uid else ""
+    finally:
+        imap.logout()
+    return set_status(cid, eid, status="gmail_draft", drafted_at=now(), error="", gmail_thread=thread)
+
+
+def sent_from_gmail(imap, item):
+    """Date of a message to this recipient in Sent since the draft was made (sent from Gmail itself), or None."""
+    imap.select(ALL_MAIL, readonly=True)
+    since = (item.get("drafted_at") or now())[:10].replace("-", "/")
+    q = f'in:sent to:{item["email"]} after:{since}'
+    typ, data = imap.uid("SEARCH", "X-GM-RAW", '"' + q + '"')
+    uids = data[0].split() if typ == "OK" else []
+    if not uids:
+        return None
+    typ, res = imap.uid("FETCH", max(uids, key=int), "(BODY.PEEK[HEADER.FIELDS (DATE)])")
+    part = next(r for r in res if isinstance(r, tuple))
+    try:
+        return parsedate_to_datetime(email.message_from_bytes(part[1])["Date"]).astimezone().isoformat(timespec="seconds")
+    except (TypeError, ValueError):
+        return now()
+
+
+def sync_drafts():
+    """Bring every email that's in Gmail Drafts in line with Gmail: edits made there show up here, a draft sent
+    from Gmail is marked sent, a draft deleted there falls back to this app's copy. Returns what changed."""
+    todo = [(c["id"], e["id"]) for c in load() for e in c["emails"] if e["status"] == "gmail_draft"]
+    if not todo:
+        return []
+    changes = []
+    imap = imap_login()
+    try:
+        for cid, eid in todo:
+            _, item = find_email(load(), cid, eid)
+            uid = find_draft(imap, item)
+            if uid:
+                msg, thread = fetch(imap, uid)
+                subject, body = app_copy(msg)
+                same = subject == item["subject"] and tight(body) == tight(item["body"])   # spacing before bullets isn't an edit
+                if not same:
+                    set_status(cid, eid, subject=subject or item["subject"], body=body or item["body"],
+                               gmail_thread=thread, synced_at=now(), error="")
+                    changes.append(f"{item['email']}: updated from Gmail")
+                elif thread != item.get("gmail_thread"):
+                    set_status(cid, eid, gmail_thread=thread)
+                continue
+            sent = sent_from_gmail(imap, item)
+            if sent:
+                set_status(cid, eid, status="sent", sent_at=sent, sent_via="gmail", error="")
+                changes.append(f"{item['email']}: sent from Gmail")
+            else:
+                set_status(cid, eid, status="draft", gmail_thread="",
+                           error="The Gmail draft was deleted; this is the app's copy. Save to Gmail Drafts to recreate it.")
+                changes.append(f"{item['email']}: Gmail draft deleted")
+    finally:
+        imap.logout()
+    return changes
 
 
 def send_one(cid, eid):
+    """Send one email. If it's in Gmail Drafts, the Gmail draft itself is sent (with any edits made in Gmail) and
+    removed from Drafts; otherwise the app's copy is built and sent."""
     camp, item = find_email(load(), cid, eid)
     if item["status"] == "sent" or item["email"].lower() in contacted():
         raise ValueError(f"{item['email']} was already emailed.")
     if sent_today() >= DAILY_CAP:
         raise ValueError(f"Daily cap reached ({DAILY_CAP} sent today). Send the rest tomorrow.")
-    msg = build(camp, item)
+    imap, uid = None, None
+    if item["status"] == "gmail_draft":
+        imap = imap_login()
+        uid = find_draft(imap, item)
+        if not uid:
+            imap.logout()
+            raise ValueError(f"The Gmail draft to {item['email']} is gone (deleted or already sent from Gmail). "
+                             "Reopen the Cold email tab to sync, then try again.")
+        msg = fetch(imap, uid)[0]
+        rcpts = [a for _, a in getaddresses(msg.get_all("To", []) + msg.get_all("Cc", []) + msg.get_all("Bcc", [])) if a]
+        if item["email"].lower() not in {a.lower() for a in rcpts}:
+            imap.logout()
+            raise ValueError(f"The Gmail draft's recipients no longer include {item['email']}; send it from Gmail instead.")
+        del msg["Bcc"]
+    else:
+        msg, rcpts = build(camp, item), None
     user, pw = login_args()
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context(), timeout=60) as smtp:
             smtp.login(user, pw)
-            smtp.send_message(msg)
+            smtp.send_message(msg, to_addrs=rcpts)
     except Exception as exc:
-        set_status(cid, eid, status="failed", error=str(exc)[:300])
+        if imap:
+            imap.logout()
+        set_status(cid, eid, status="failed" if not imap else "gmail_draft", error=str(exc)[:300])
         raise
-    return set_status(cid, eid, status="sent", sent_at=now(), error="", message_id=msg["Message-ID"])
+    fields = {"status": "sent", "sent_at": now(), "error": "", "message_id": msg["Message-ID"] or ""}
+    if imap:   # the draft is sent: take it out of Drafts and keep what was actually sent
+        try:
+            trash(imap, uid)
+        finally:
+            imap.logout()
+        subject, body = app_copy(msg)
+        fields.update(subject=subject or item["subject"], body=body or item["body"], sent_via="gmail draft")
+    return set_status(cid, eid, **fields)
 
 
 # ---------- CLI ----------
@@ -490,6 +699,10 @@ def main():
     f.add_argument("--domain")
     f.add_argument("--work", required=True)
     f.add_argument("--apollo", action="store_true", help="Apollo fallback approved: don't fail when Hunter can't help")
+    mc = sub.add_parser("contacts")
+    mc.add_argument("--company", required=True)
+    mc.add_argument("--file", required=True)
+    mc.add_argument("--work", required=True)
     ic = sub.add_parser("import-contacts")
     ic.add_argument("--work", required=True)
     ic.add_argument("--file", required=True)
@@ -501,6 +714,7 @@ def main():
     e.add_argument("cid", type=int)
     e.add_argument("eid", type=int)
     e.add_argument("out")
+    sub.add_parser("sync", help="bring emails in Gmail Drafts in line with Gmail")
     d = sub.add_parser("draft")
     d.add_argument("cid", type=int)
     d.add_argument("eid", type=int)
@@ -532,6 +746,22 @@ def main():
                 else:
                     sys.exit(f"FAILED: no recruiters found at {out['company']} ({why}"
                              + ("; the rest were already contacted" if out["found"] else "") + "). Tick 'Use Apollo' to try Apollo.")
+        elif args.cmd == "contacts":
+            out, problems, already = manual_contacts(args.company.strip(), args.file, args.work)
+            print(f"{out['company']} ({out['domain']}): {len(out['contacts'])} recipient(s) -> {args.work}/contacts.json")
+            for c in out["contacts"]:
+                print(f"  {(c['first_name'] + ' ' + c['last_name']).strip() or '(no name)'}, {c['title'] or '(no title)'} <{c['email']}>")
+            for a in already:
+                print(f"  SKIPPED {a}: already emailed in an earlier campaign")
+            for x in problems:
+                print(f"  SKIPPED {x}")
+            jobs = tracked_jobs(out["company"])
+            if jobs:
+                print("Tracked jobs at this company (status, fit):")
+                for r in jobs[:10]:
+                    print(f"  #{r['id']} {r['role']} [{r['status']}] fit {(r.get('fit') or {}).get('score', '-')}")
+            if not out["contacts"]:
+                sys.exit("FAILED: no new recipients to write to" + (" (all were already emailed)" if already else "") + ".")
         elif args.cmd == "import-contacts":
             out, added, skipped = import_contacts(args.work, args.file)
             print(f"Imported {len(added)} Apollo contact(s); {len(out['contacts'])} contacts in {args.work}/contacts.json")
@@ -551,6 +781,9 @@ def main():
             camp, item = find_email(load(), args.cid, args.eid)
             Path(args.out).write_bytes(bytes(build(camp, item)))
             print(f"Wrote {args.out}")
+        elif args.cmd == "sync":
+            for c in sync_drafts() or ["Nothing to sync."]:
+                print(c)
         elif args.cmd == "draft":
             item = gmail_draft(args.cid, args.eid)
             print(f"Gmail draft created for {item['email']}")
