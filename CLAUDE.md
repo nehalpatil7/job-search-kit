@@ -22,6 +22,7 @@ Tailors one LaTeX resume to job descriptions and tracks applications.
 - `base/profile.json`: name, contact details, home location, job-search start date (`searchStart`) and application defaults, used for PDF names, job-location filters, the Gmail counters, the prefill script (`tools/apply/autofill.js`) and for the cold-email signature; null means the user answers it themselves.
 - `outreach.json`: cold-email campaigns. Change it only through `python3 tools/outreach.py`. Emails attach the resume set by `coldEmailResume` in profile.json (default: the base PDF).
 - `tools/inbox.py`: counts applications per day from Gmail confirmation emails (read-only IMAP, same app password); feeds the daily counter, and lists confirmations not yet in the tracker (`pending`). Tracker jobs keep the Message-IDs of their confirmations in `gmail_ids`; import them only via `tracker.py import-gmail`.
+- `tools/gmail-send-drafts.gs`: Google Apps Script (runs in the user's Google account, not locally) that sends every Gmail draft with a recipient at 8:00 AM (its TIME_ZONE) on weekdays, up to 25.
 - `tools/server.py`: optional local web page for the tracker; queues /tailor, /tailor-combined, /track and /answer runs and runs 2 at a time (`--parallel N`).
 
 ## Rules

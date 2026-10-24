@@ -149,6 +149,16 @@ One-time setup (secrets go in the macOS Keychain, never in the project):
 
 CLI: `python3 tools/outreach.py status | list | eml | draft | send` (see the top of the file).
 
+## Morning send from Gmail Drafts (optional)
+
+`tools/gmail-send-drafts.gs` is a Google Apps Script that runs on Google's servers (your Mac can be off). Every weekday at 8:00 AM in the script's `TIME_ZONE` (set it to yours at the top; default `America/Denver`) it sends **every draft in your Gmail Drafts folder** that has a recipient, up to 25 per morning, 15–30 s apart. Sent emails land in Sent Mail, and the Cold email tab marks them Sent the next time it syncs. So the flow is: write the emails here, **Save to Gmail Drafts**, edit them in Gmail if you like, and they go out the next weekday morning. Keep anything you don't want sent out of Drafts.
+
+Setup, once:
+1. Open https://script.google.com, click **New project**, and replace the contents of `Code.gs` with `tools/gmail-send-drafts.gs`. Save.
+2. In the function menu at the top choose **setup**, click **Run**, and allow access to your Gmail when asked.
+
+That creates a check every 5 minutes; it only sends during the 8:00 hour on weekdays. To turn it off, run **stop**. Each run's log is under **Executions** in the script editor.
+
 ## Daily target (top right)
 
 Today's applications against a target of 50, with the last 7 days below. The count comes from application-confirmation emails in Gmail ("Thank you for applying…", "We've received your application…"), so it covers every site you apply on, not just the tracker. Gmail search drops emails that read like rejections, and subjects like "Application Update" or "Important information about your application" are not counted. It reads Gmail read-only (nothing is marked read), rechecks every 5 minutes, and rechecks at once when you click the number. Hover it to see the tracker's count too. Without Gmail access it falls back to jobs marked Applied in the tracker.
