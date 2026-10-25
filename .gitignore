@@ -2,6 +2,8 @@
 tracker.json
 matches.json
 outreach.json
+notes.json
+inbox_state.json
 resumes/
 # scratch and locks
 .work/

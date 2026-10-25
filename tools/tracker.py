@@ -10,6 +10,7 @@ Usage:
   python3 tools/tracker.py update ID [--status S] [--notes-file F]
   python3 tools/tracker.py add-combined --manifest WORK/jobs.json --resume-from WORK/<First>_<Last>_Resume.pdf [--clean-work WORK]
   python3 tools/tracker.py import-gmail --file WORK/import.json [--clean-work WORK]
+  python3 tools/tracker.py gmail-status        # apply rejections / interview invitations found in Gmail
   python3 tools/tracker.py list
   python3 tools/tracker.py base-pdf
   python3 tools/tracker.py show ID
@@ -449,6 +450,33 @@ def import_gmail(file, clean_work=None):
     return out, problems
 
 
+# a Gmail email may move a job forward to these statuses, from these ones only (never Offer, Withdrawn or back)
+GMAIL_MOVES = {"Rejected": {"Saved", "Resume ready", "Applied", "Interviewing"}, "Interviewing": {"Saved", "Resume ready", "Applied"}}
+
+
+def apply_gmail_status(changes):
+    """changes: [(record id, status, email {id, date, from, subject})]. Moves each job forward if allowed, logs the
+    email on the job (`status_log`, `gmail_status_ids`) and returns the records changed."""
+    out = []
+    with locked():
+        records = load()
+        by_id = {r["id"]: r for r in records}
+        for rid, status, x in changes:
+            rec = by_id.get(rid)
+            if not rec or x["id"] in rec.get("gmail_status_ids", []):
+                continue
+            rec.setdefault("gmail_status_ids", []).append(x["id"])
+            if rec.get("status", "Saved") not in GMAIL_MOVES.get(status, set()):
+                continue
+            rec["status"] = status
+            rec.setdefault("status_log", []).append({"status": status, "date": x["date"], "via": "gmail",
+                                                     "subject": x["subject"][:200], "from": x["from"][:120]})
+            rec["updated"] = now()
+            out.append(rec)
+        save(records)
+    return out
+
+
 def update(rec_id, **fields):
     with locked():
         records = load()
@@ -528,6 +556,7 @@ def main():
     ig.add_argument("--file", required=True)
     ig.add_argument("--clean-work", metavar="DIR")
 
+    sub.add_parser("gmail-status", help="apply rejections and interview invitations found in Gmail")
     sub.add_parser("list")
     sub.add_parser("base-pdf")
 
@@ -596,6 +625,12 @@ def main():
         print(f"Imported {len(out)} confirmation(s): {sum(c for _, c in out)} new job(s), {sum(not c for _, c in out)} linked to tracked jobs.")
         for x in problems:
             print(f"  SKIPPED {x}")
+    elif args.cmd == "gmail-status":
+        import inbox
+        changes, unmatched = inbox.statuses()
+        for rec in apply_gmail_status(changes):
+            print(f"Updated #{rec['id']}: {rec['company']} - {rec['role']} [{rec['status']}] from Gmail")
+        print(f"{len(unmatched)} email(s) need you (ambiguous or untracked): see the web page or `python3 tools/inbox.py statuses`.")
     elif args.cmd == "list":
         for r in load():
             print(f"#{r['id']:<4}{r['date_added']}  {r['status']:<13}{r['company']} - {r['role']}  "

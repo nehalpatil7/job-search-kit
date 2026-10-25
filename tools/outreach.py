@@ -72,6 +72,8 @@ HUNTER = "https://api.hunter.io/v2/domain-search"
 MAX_RECIPIENTS = 20                            # per campaign when you give the addresses yourself
 APOLLO_MAX = 5                                 # Apollo credits one run may spend (fallback only)
 STATUSES = ["draft", "gmail_draft", "sent", "failed"]
+FOLLOWUP_AFTER_DAYS = 3                        # earliest follow-up after the last email to someone
+MAX_FOLLOWUPS = 2                              # follow-ups per person; none once they reply
 
 
 # ---------- storage ----------
@@ -120,8 +122,11 @@ def contacted():
 
 
 def sent_today():
+    """Emails and follow-ups sent today (they share the daily cap)."""
     day = dt.date.today().isoformat()
-    return sum(1 for c in load() for e in c["emails"] if e["status"] == "sent" and (e.get("sent_at") or "").startswith(day))
+    return sum(1 for c in load() for e in c["emails"] if e["status"] == "sent" and (e.get("sent_at") or "").startswith(day)) + \
+        sum(1 for c in load() for e in c["emails"] for f in e.get("followups", [])
+            if f["status"] == "sent" and (f.get("sent_at") or "").startswith(day))
 
 
 # ---------- secrets and setup ----------
@@ -493,19 +498,29 @@ def to_html(body):
     return "".join(out)
 
 
+def sig_text():
+    name, phone, links = signature()
+    return f"Best,\n{name}\n" + "\n".join([phone] + [short(l) for l in links]) + "\n"
+
+
+def sig_html():
+    name, phone, links = signature()
+    return (f"<div>Best,<br>{html.escape(name)}<br>{html.escape(phone)}<br>"
+            + "<br>".join(f'<a href="{html.escape(l)}">{html.escape(short(l))}</a>' for l in links) + "</div>")
+
+
 def build(camp, item, to=None):
     p = profile()
-    name, phone, links = signature()
-    text = f"{tight(item['body'])}\n\nBest,\n{name}\n" + "\n".join([phone] + [short(l) for l in links]) + "\n"
-    sig_html = (f"<div>Best,<br>{html.escape(name)}<br>{html.escape(phone)}<br>"
-                + "<br>".join(f'<a href="{html.escape(l)}">{html.escape(short(l))}</a>' for l in links) + "</div>")
+    name = signature()[0]
+    text = f"{tight(item['body'])}\n\n{sig_text()}"
+    sig_html_ = sig_html()
     msg = EmailMessage()
     msg["From"] = formataddr((name, p["email"]))
     msg["To"] = formataddr((item.get("name") or "", to or item["email"]))
     msg["Subject"] = item["subject"]
     msg["Message-ID"] = make_msgid(domain=p["email"].split("@")[-1])
     msg.set_content(text)
-    msg.add_alternative(f'<div dir="ltr">{to_html(item["body"])}{sig_html}</div>', subtype="html")
+    msg.add_alternative(f'<div dir="ltr">{to_html(item["body"])}{sig_html_}</div>', subtype="html")
     if not RESUME_PDF.exists():
         raise ValueError(f"Resume not found: {RESUME_PDF}")
     msg.add_attachment(RESUME_PDF.read_bytes(), maintype="application", subtype="pdf", filename=ATTACH_NAME)
@@ -607,40 +622,143 @@ def sent_from_gmail(imap, item):
         return now()
 
 
-def sync_drafts():
-    """Bring every email that's in Gmail Drafts in line with Gmail: edits made there show up here, a draft sent
-    from Gmail is marked sent, a draft deleted there falls back to this app's copy. Returns what changed."""
-    todo = [(c["id"], e["id"]) for c in load() for e in c["emails"] if e["status"] == "gmail_draft"]
-    if not todo:
+def addrs(msg, *fields):
+    return [a.lower() for _, a in getaddresses(sum((msg.get_all(f, []) for f in fields), [])) if a]
+
+
+def when(msg):
+    try:
+        return parsedate_to_datetime(msg["Date"]).astimezone().isoformat(timespec="seconds")
+    except (TypeError, ValueError):
+        return now()
+
+
+def search_headers(imap, query, fields):
+    """[(headers message, gmail thread id)] for All Mail messages matching a Gmail search, oldest first."""
+    imap.select(ALL_MAIL, readonly=True)
+    typ, data = imap.uid("SEARCH", "X-GM-RAW", '"' + query.replace('"', '\\"') + '"')
+    uids = data[0].split() if typ == "OK" else []
+    out = []
+    for i in range(0, len(uids), 200):
+        typ, res = imap.uid("FETCH", b",".join(uids[i:i + 200]), f"(X-GM-THRID BODY.PEEK[HEADER.FIELDS ({fields})])")
+        for part in res:
+            if isinstance(part, tuple):
+                thread = re.search(rb"X-GM-THRID (\d+)", part[0])
+                out.append((email.message_from_bytes(part[1]), thread.group(1).decode() if thread else ""))
+    return out
+
+
+def sent_index(imap, since):
+    """Sent mail since `since` (YYYY-MM-DD) by recipient: {address: [{date, msgid, thread, subject}]}, oldest first."""
+    index = {}
+    for msg, thread in search_headers(imap, f"in:sent after:{since.replace('-', '/')}", "TO CC DATE SUBJECT MESSAGE-ID"):
+        info = {"date": when(msg), "msgid": (msg["Message-ID"] or "").strip(), "thread": thread,
+                "subject": re.sub(r"\s+", " ", str(msg["Subject"] or "")).strip()}
+        for a in addrs(msg, "To", "Cc"):
+            index.setdefault(a, []).append(info)
+    for v in index.values():
+        v.sort(key=lambda x: x["date"])
+    return index
+
+
+def reply_index(imap, people, since):
+    """Earliest message from each of these addresses since `since`: {address: date}."""
+    found = {}
+    people = sorted(people)
+    for i in range(0, len(people), 30):
+        q = f"-in:sent -in:drafts after:{since.replace('-', '/')} {{{' '.join('from:' + a for a in people[i:i + 30])}}}"
+        for msg, _ in search_headers(imap, q, "FROM DATE"):
+            for a in addrs(msg, "From"):
+                if a in people and (a not in found or when(msg) < found[a]):
+                    found[a] = when(msg)
+    return found
+
+
+def is_reply(subject):
+    return bool(re.match(r"\s*(re|fwd?)\s*:", subject, re.I))
+
+
+def sync_gmail():
+    """Bring every email in line with Gmail, in one pass: edits made to a Gmail draft show up here, a draft deleted
+    there falls back to the app's copy, and anything sent from Gmail (by hand, by a script, or from the app) is
+    marked sent with its thread, so follow-ups can reply in it. Replies from recipients and sent follow-up drafts
+    are noted too. Returns what changed."""
+    campaigns = load()
+    items = [(c, e) for c in campaigns for e in c["emails"]]
+    if not items:
         return []
-    changes = []
+    since = min(c["date"][:10] for c, _ in items)
+    changes, updates = [], []   # updates: (cid, eid, fields) applied under the lock at the end
     imap = imap_login()
     try:
-        for cid, eid in todo:
-            _, item = find_email(load(), cid, eid)
-            uid = find_draft(imap, item)
-            if uid:
-                msg, thread = fetch(imap, uid)
-                subject, body = app_copy(msg)
-                same = subject == item["subject"] and tight(body) == tight(item["body"])   # spacing before bullets isn't an edit
-                if not same:
-                    set_status(cid, eid, subject=subject or item["subject"], body=body or item["body"],
-                               gmail_thread=thread, synced_at=now(), error="")
-                    changes.append(f"{item['email']}: updated from Gmail")
-                elif thread != item.get("gmail_thread"):
-                    set_status(cid, eid, gmail_thread=thread)
-                continue
-            sent = sent_from_gmail(imap, item)
-            if sent:
-                set_status(cid, eid, status="sent", sent_at=sent, sent_via="gmail", error="")
-                changes.append(f"{item['email']}: sent from Gmail")
-            else:
-                set_status(cid, eid, status="draft", gmail_thread="",
-                           error="The Gmail draft was deleted; this is the app's copy. Save to Gmail Drafts to recreate it.")
-                changes.append(f"{item['email']}: Gmail draft deleted")
+        sent = sent_index(imap, since)
+        waiting = {e["email"].lower() for _, e in items if e["status"] == "sent" and not e.get("replied_at")}
+        replies = reply_index(imap, waiting, since) if waiting else {}
+        for c, e in items:
+            addr, fields = e["email"].lower(), {}
+            firsts = [x for x in sent.get(addr, []) if not is_reply(x["subject"])]
+            if e["status"] == "gmail_draft":
+                uid = find_draft(imap, e)
+                if uid:
+                    msg, thread = fetch(imap, uid)
+                    subject, body = app_copy(msg)
+                    if subject != e["subject"] or tight(body) != tight(e["body"]):   # spacing before bullets isn't an edit
+                        fields.update(subject=subject or e["subject"], body=body or e["body"], synced_at=now(), error="")
+                        changes.append(f"{e['email']}: updated from Gmail")
+                    if thread != e.get("gmail_thread"):
+                        fields["gmail_thread"] = thread
+                    updates.append((c["id"], e["id"], fields))
+                    continue
+                after = [x for x in firsts if x["date"][:10] >= (e.get("drafted_at") or c["date"])[:10]]
+                if after:
+                    x = after[0]
+                    fields.update(status="sent", sent_at=x["date"], sent_via="gmail", error="",
+                                  sent_msgid=x["msgid"], sent_thread=x["thread"], sent_subject=x["subject"])
+                    changes.append(f"{e['email']}: sent from Gmail")
+                else:
+                    fields.update(status="draft", gmail_thread="",
+                                  error="The Gmail draft was deleted; this is the app's copy. Save to Gmail Drafts to recreate it.")
+                    changes.append(f"{e['email']}: Gmail draft deleted")
+            elif e["status"] in ("draft", "failed"):
+                after = [x for x in firsts if x["date"][:10] >= c["date"][:10]]
+                if after:   # written in the app, sent by hand from Gmail
+                    x = after[0]
+                    fields.update(status="sent", sent_at=x["date"], sent_via="gmail (outside the app)", error="",
+                                  sent_msgid=x["msgid"], sent_thread=x["thread"], sent_subject=x["subject"])
+                    changes.append(f"{e['email']}: sent from Gmail")
+            elif e["status"] == "sent":
+                if not e.get("sent_msgid"):
+                    after = [x for x in firsts if x["date"][:10] >= (e.get("sent_at") or c["date"])[:10]] or firsts
+                    if after:
+                        x = after[0]
+                        fields.update(sent_msgid=x["msgid"], sent_thread=x["thread"], sent_subject=x["subject"])
+                if addr in replies and replies[addr] >= (e.get("sent_at") or ""):
+                    fields["replied_at"] = replies[addr]
+                    changes.append(f"{e['email']}: replied")
+                followups = [dict(f) for f in e.get("followups", [])]
+                for f in followups:
+                    if f["status"] == "gmail_draft":
+                        later = [x for x in sent.get(addr, []) if is_reply(x["subject"]) and x["date"] >= f["created"]]
+                        if later:
+                            f.update(status="sent", sent_at=later[0]["date"])
+                            changes.append(f"{e['email']}: follow-up sent from Gmail")
+                if followups != e.get("followups", []):
+                    fields["followups"] = followups
+            if fields:
+                updates.append((c["id"], e["id"], fields))
     finally:
         imap.logout()
+    if updates:
+        with locked():
+            campaigns = load()
+            for cid, eid, fields in updates:
+                if fields:
+                    find_email(campaigns, cid, eid)[1].update(fields)
+            save(campaigns)
     return changes
+
+
+sync_drafts = sync_gmail   # older name
 
 
 def send_one(cid, eid):
@@ -686,6 +804,106 @@ def send_one(cid, eid):
         subject, body = app_copy(msg)
         fields.update(subject=subject or item["subject"], body=body or item["body"], sent_via="gmail draft")
     return set_status(cid, eid, **fields)
+
+
+# ---------- follow-ups: a reply in the original thread, not a new email ----------
+
+def followup_state(item):
+    """(can follow up now, why not)."""
+    if item["status"] != "sent":
+        return False, "not sent yet"
+    if item.get("replied_at"):
+        return False, "they replied"
+    done = [f for f in item.get("followups", [])]
+    if len(done) >= MAX_FOLLOWUPS:
+        return False, f"{MAX_FOLLOWUPS} follow-ups already"
+    last = max([item.get("sent_at") or ""] + [f.get("sent_at") or f["created"] for f in done])
+    try:
+        days = (dt.datetime.now().astimezone() - dt.datetime.fromisoformat(last).astimezone()).days
+    except ValueError:
+        days = FOLLOWUP_AFTER_DAYS
+    if days < FOLLOWUP_AFTER_DAYS:
+        return False, f"wait {FOLLOWUP_AFTER_DAYS - days} more day(s)"
+    if not item.get("sent_msgid"):
+        return False, "original not found in Gmail yet (Sync with Gmail)"
+    return True, ""
+
+
+def followup_template(camp, item):
+    first = (item.get("name") or "").split(" ")[0]
+    n = len(item.get("followups", []))
+    hi = f"Hi {first}," if first else "Hello,"
+    if n == 0:
+        return (f"{hi}\n\nJust following up on my note below about engineering roles at {camp['company']}. I'm still very "
+                f"interested and would welcome a quick chat, or I'd be grateful if you could share my resume with the hiring "
+                f"manager.\n\nThanks for your time.")
+    return (f"{hi}\n\nI know inboxes get busy, so I'll keep this short: I'm still very interested in engineering roles at "
+            f"{camp['company']} and would be glad to connect whenever it suits you.\n\nThanks again.")
+
+
+def build_followup(camp, item, body):
+    p = profile()
+    name = signature()[0]
+    first = item.get("sent_subject") or item["subject"]
+    subject = first if is_reply(first) else f"Re: {first}"
+    try:
+        on = dt.datetime.fromisoformat(item["sent_at"]).strftime("%a, %b %-d, %Y")
+    except (ValueError, KeyError):
+        on = "earlier"
+    quote = f"{tight(item['body'])}\n\n{sig_text()}"
+    text = (f"{tight(body)}\n\n{sig_text()}\nOn {on}, {name} <{p['email']}> wrote:\n"
+            + "\n".join("> " + l for l in quote.splitlines()) + "\n")
+    refs = " ".join([item["sent_msgid"]] + [f["message_id"] for f in item.get("followups", []) if f.get("message_id")])
+    msg = EmailMessage()
+    msg["From"] = formataddr((name, p["email"]))
+    msg["To"] = formataddr((item.get("name") or "", item["email"]))
+    msg["Subject"] = subject
+    msg["Message-ID"] = make_msgid(domain=p["email"].split("@")[-1])
+    msg["In-Reply-To"] = refs.split()[-1]
+    msg["References"] = refs
+    msg.set_content(text)
+    msg.add_alternative(
+        f'<div dir="ltr">{to_html(body)}{sig_html()}<br><div class="gmail_quote"><div dir="ltr">On {html.escape(on)}, '
+        f'{html.escape(name)} &lt;{html.escape(p["email"])}&gt; wrote:<br></div>'
+        f'<blockquote class="gmail_quote" style="margin:0 0 0 .8ex;border-left:1px #ccc solid;padding-left:1ex">'
+        f'{to_html(item["body"])}{sig_html()}</blockquote></div></div>', subtype="html")
+    return msg
+
+
+def send_followup(cid, eid, body, draft=False):
+    """Reply to the sent email in its thread: send now, or put the reply in Gmail Drafts."""
+    camp, item = find_email(load(), cid, eid)
+    ok, why = followup_state(item)
+    if not ok:
+        raise ValueError(f"Can't follow up with {item['email']}: {why}.")
+    body = (body or "").strip()
+    if not body or words(body) > MAX_WORDS:
+        raise ValueError(f"Write the follow-up first (at most {MAX_WORDS} words).")
+    msg = build_followup(camp, item, body)
+    rec = {"created": now(), "body": body, "message_id": msg["Message-ID"]}
+    if draft:
+        imap = imap_login()
+        try:
+            typ, data = imap.append(DRAFTS, r"(\Draft)", imaplib.Time2Internaldate(time.time()), msg.as_bytes())
+            if typ != "OK":
+                raise RuntimeError(f"Gmail refused the draft: {data}")
+        finally:
+            imap.logout()
+        rec["status"] = "gmail_draft"
+    else:
+        if sent_today() >= DAILY_CAP:
+            raise ValueError(f"Daily cap reached ({DAILY_CAP} sent today). Send it tomorrow, or save it to Gmail Drafts.")
+        user, pw = login_args()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context(), timeout=60) as smtp:
+            smtp.login(user, pw)
+            smtp.send_message(msg)
+        rec.update(status="sent", sent_at=now())
+    with locked():
+        campaigns = load()
+        it = find_email(campaigns, cid, eid)[1]
+        it.setdefault("followups", []).append(rec)
+        save(campaigns)
+        return it
 
 
 # ---------- CLI ----------
@@ -782,7 +1000,7 @@ def main():
             Path(args.out).write_bytes(bytes(build(camp, item)))
             print(f"Wrote {args.out}")
         elif args.cmd == "sync":
-            for c in sync_drafts() or ["Nothing to sync."]:
+            for c in sync_gmail() or ["Nothing to sync."]:
                 print(c)
         elif args.cmd == "draft":
             item = gmail_draft(args.cid, args.eid)

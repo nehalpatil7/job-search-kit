@@ -485,7 +485,104 @@ def applied_daily(refresh=False):
     done = inbox.imported_ids(tracker.load())
     todo = [x["id"] for x in data["since_start"] if x["id"] not in done]
     view = {k: v for k, v in data.items() if k not in ("since_start", "rejections")}
-    return {"data": view, "error": _inbox["error"], "pending": todo}
+    gmail_background()
+    return {"data": view, "error": _inbox["error"], "pending": todo, "gmail": gmail_view()}
+
+
+# ---------- Gmail in the background: cold-email sync, job statuses (no Claude, no tokens) ----------
+
+GMAIL_EVERY = 5 * 60   # seconds between background passes while the page is open
+_gmail = {"running": False, "at": 0, "updated": [], "unmatched": [], "outreach": [], "error": ""}
+_gmail_lock = threading.Lock()
+
+
+def gmail_pass():
+    try:
+        changes = outreach.sync_gmail()
+        found, unmatched = inbox.statuses()
+        applied = tracker.apply_gmail_status(found)
+        with _gmail_lock:
+            _gmail["outreach"] = (changes + _gmail["outreach"])[:30]
+            _gmail["updated"] = ([{"id": r["id"], "company": r["company"], "role": r["role"], "status": r["status"],
+                                   "subject": r["status_log"][-1]["subject"], "date": r["status_log"][-1]["date"]}
+                                  for r in applied] + _gmail["updated"])[:50]
+            _gmail["unmatched"] = [{"id": x["id"], "date": x["date"], "from": x["from"], "subject": x["subject"],
+                                    "status": x["status"], "why": why, "candidates": x.get("candidates", [])}
+                                   for x, why in unmatched if x.get("candidates")]   # emails a click can settle
+            _gmail["error"] = ""
+    except Exception as exc:
+        with _gmail_lock:
+            _gmail["error"] = f"Gmail sync failed: {exc}"[:300]
+    finally:
+        with _gmail_lock:
+            _gmail.update(running=False, at=time.time())
+
+
+def gmail_background(force=False):
+    with _gmail_lock:
+        if _gmail["running"] or (not force and time.time() - _gmail["at"] < GMAIL_EVERY):
+            return
+        _gmail["running"] = True
+    threading.Thread(target=gmail_pass, daemon=True).start()
+
+
+def gmail_view():
+    with _gmail_lock:
+        return {k: _gmail[k] for k in ("running", "at", "updated", "unmatched", "outreach", "error")}
+
+
+def settle_status_email(gmail_id, record_id=None):
+    """The user's choice for an email Gmail couldn't match: apply it to one job, or dismiss it."""
+    with _gmail_lock:
+        x = next((u for u in _gmail["unmatched"] if u["id"] == gmail_id), None)
+    if not x:
+        raise ValueError("That email is no longer waiting; reload the page.")
+    if record_id:
+        if record_id not in {c["id"] for c in x["candidates"]}:
+            raise ValueError("Pick one of the jobs listed for that email.")
+        tracker.apply_gmail_status([(record_id, x["status"], x)])
+    else:
+        inbox.dismiss(gmail_id)
+    with _gmail_lock:
+        _gmail["unmatched"] = [u for u in _gmail["unmatched"] if u["id"] != gmail_id]
+
+
+# ---------- notes ----------
+
+NOTES = ROOT / "notes.json"
+_notes_lock = threading.Lock()
+
+
+def notes_load():
+    try:
+        return json.loads(NOTES.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def notes_save(notes):
+    tmp = NOTES.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(notes, indent=1, ensure_ascii=False))
+    os.replace(tmp, NOTES)
+
+
+def note_change(note_id=None, fields=None, delete=False):
+    with _notes_lock:
+        notes = notes_load()
+        if note_id is None:
+            note = {"id": max((n["id"] for n in notes), default=0) + 1, "title": "", "body": "",
+                    "created": tracker.now(), "updated": tracker.now()}
+            notes.append(note)
+        else:
+            note = next((n for n in notes if n["id"] == note_id), None)
+            if not note:
+                raise ValueError("No such note.")
+            if delete:
+                notes.remove(note)
+            else:
+                note.update({k: str(v)[:100000] for k, v in (fields or {}).items() if k in ("title", "body")}, updated=tracker.now())
+        notes_save(notes)
+        return note
 
 
 SYNC_BATCH = 100   # emails per import run
@@ -573,6 +670,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/applied-daily":
             fresh = parse_qs(url.query).get("refresh") == ["1"]
             return self.send(200, applied_daily(fresh))
+        if path == "/api/notes":
+            return self.send(200, {"notes": notes_load()})
+        m = re.fullmatch(r"/api/outreach/(\d+)/(\d+)/followup", path)
+        if m:
+            try:
+                camp, item = outreach.find_email(outreach.load(), int(m.group(1)), int(m.group(2)))
+            except ValueError as exc:
+                return self.error(404, str(exc))
+            ok, why = outreach.followup_state(item)
+            return self.send(200, {"ok": ok, "why": why, "body": outreach.followup_template(camp, item)})
         if path == "/api/outreach":
             synced, sync_error = [], ""
             if parse_qs(url.query).get("sync") == ["1"]:   # pull edits made in Gmail Drafts, drafts sent or deleted there
@@ -637,6 +744,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, start_outreach(data.get("company"), data.get("recipients") or "", bool(data.get("apollo"))).view())
             except ValueError as exc:
                 return self.error(400, str(exc))
+        if path == "/api/gmail-status":
+            try:
+                settle_status_email(data.get("id"), int(data["record"]) if data.get("record") else None)
+            except (ValueError, TypeError) as exc:
+                return self.error(400, str(exc))
+            return self.send(200, {"ok": True})
+        if path == "/api/notes":
+            return self.send(200, note_change())
+        fu = re.fullmatch(r"/api/outreach/(\d+)/(\d+)/followup", path)
+        if fu:
+            try:
+                item = outreach.send_followup(int(fu.group(1)), int(fu.group(2)), data.get("body", ""), bool(data.get("draft")))
+            except Exception as exc:
+                return self.error(400, f"Follow-up not sent: {exc}")
+            return self.send(200, item)
         od = re.fullmatch(r"/api/outreach/(\d+)/(\d+)/draft", path)
         if od:
             try:
@@ -696,6 +818,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         if not self.write_ok():
             return self.error(403, "forbidden")
+        nm = re.fullmatch(r"/api/notes/(\d+)", urlparse(self.path).path)
+        if nm:
+            try:
+                return self.send(200, note_change(int(nm.group(1)), self.body()))
+            except ValueError as exc:
+                return self.error(404, str(exc))
         oe = re.fullmatch(r"/api/outreach/(\d+)/(\d+)", urlparse(self.path).path)
         if oe:
             data = self.body()
@@ -724,6 +852,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         if not self.write_ok():
             return self.error(403, "forbidden")
+        nm = re.fullmatch(r"/api/notes/(\d+)", urlparse(self.path).path)
+        if nm:
+            try:
+                note_change(int(nm.group(1)), delete=True)
+            except ValueError as exc:
+                return self.error(404, str(exc))
+            return self.send(200, {"ok": True})
         mm = re.fullmatch(r"/api/matches/(\d+)", urlparse(self.path).path)
         if mm:
             return self.send(200, {"ok": careers.delete_search(int(mm.group(1)))})

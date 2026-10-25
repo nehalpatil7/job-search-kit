@@ -22,7 +22,8 @@ Tailors one LaTeX resume to job descriptions and tracks applications.
 - `base/profile.json`: name, contact details, home location, job-search start date (`searchStart`) and application defaults, used for PDF names, job-location filters, the Gmail counters, the prefill script (`tools/apply/autofill.js`) and for the cold-email signature; null means the user answers it themselves.
 - `outreach.json`: cold-email campaigns. Change it only through `python3 tools/outreach.py`. Emails attach the resume set by `coldEmailResume` in profile.json (default: the base PDF).
 - `tools/inbox.py`: counts applications per day from Gmail confirmation emails (read-only IMAP, same app password); feeds the daily counter, and lists confirmations not yet in the tracker (`pending`). Tracker jobs keep the Message-IDs of their confirmations in `gmail_ids`; import them only via `tracker.py import-gmail`.
-- `tools/gmail-send-drafts.gs`: Google Apps Script (runs in the user's Google account, not locally) that sends every Gmail draft with a recipient at 8:00 AM (its TIME_ZONE) on weekdays, up to 25.
+- `notes.json`: the Notes tab (written only by `tools/server.py`).
+- `inbox_state.json`: status emails dismissed in the web page (written only by `tools/inbox.py`).
 - `tools/server.py`: optional local web page for the tracker; queues /tailor, /tailor-combined, /track and /answer runs and runs 2 at a time (`--parallel N`).
 
 ## Rules
@@ -31,7 +32,7 @@ Tailors one LaTeX resume to job descriptions and tracks applications.
 - The result must be exactly one page, filled to the bottom, and pass `python3 tools/check_resume.py <run folder>/resume.tex` with no FAIL or WARN lines.
 - Fit scores (`fit` on a job) are set once and never changed: always pass them via `tracker.py add --fit` / `set-fit`, scored with the rubric.
 - Application answers are saved per job in tracker.json (`qa`, with earlier versions in `history`). Save them only via `python3 tools/tracker.py qa-add`.
-- Status changes: `python3 tools/tracker.py update <id> --status "<Status>"`. Statuses: Saved, Resume ready, Applied, Interviewing, Offer, Rejected, Withdrawn.
+- Status changes: `python3 tools/tracker.py update <id> --status "<Status>"`. Statuses read from Gmail (rejections, interview invitations) are applied only via `python3 tools/tracker.py gmail-status`, which moves jobs forward only and logs the email in `status_log`. Statuses: Saved, Resume ready, Applied, Interviewing, Offer, Rejected, Withdrawn.
 - When the user confirms a new true fact, add it to `base/facts.md` under the right role before using it. Editing facts.md is allowed; editing base/resume.tex is not.
 - Cold emails are sent only when the user presses Send in the Cold email tab. Claude never runs `outreach.py send` or `draft`.
 - To change base/resume.tex, the user must ask explicitly. Then run `touch base/.unlock`, make the edit, check a copy with the checker, and `rm base/.unlock`.

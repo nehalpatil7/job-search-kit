@@ -136,6 +136,23 @@
   .pill.queued { background: transparent; border: 1px solid var(--line); color: var(--muted); }
   .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
   .tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 14px; color: var(--muted); font-weight: 600; }
+  .gbox { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; margin: 0 0 10px; font-size: 13px; }
+  .gbox summary { color: var(--ink); margin-top: 0; }
+  .gbox .g { padding: 5px 0; border-top: 1px solid var(--line); }
+  .gbox .g:first-of-type { border-top: none; }
+  .gbox .g button { padding: 2px 8px; font-size: 12px; margin: 3px 4px 0 0; }
+  .fu { border-top: 1px dashed var(--line); margin-top: 8px; padding-top: 8px; font-size: 13px; }
+  .fu textarea { min-height: 110px; }
+  .pill.replied { background: var(--good); color: var(--panel); }
+  .note { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 12px; margin-top: 12px; background: var(--panel); }
+  .note input { font-size: 16px; font-weight: 700; border: none; border-bottom: 1px solid var(--line); border-radius: 0;
+                background: transparent; padding: 2px 0 6px; color: var(--ink); }
+  .note input::placeholder { font-weight: 400; }
+  .note textarea { display: block; width: 100%; box-sizing: border-box; border: none; background: transparent; margin-top: 8px; padding: 2px 0;
+                   font-size: 13px; line-height: 1.6; color: var(--ink);
+                   min-height: 160px; max-height: 75vh; overflow-y: auto; resize: vertical; white-space: pre-wrap; }
+  .note .meta { font-size: 12px; color: var(--muted); display: flex; gap: 12px; align-items: center; border-top: 1px solid var(--line); padding-top: 6px; margin-top: 6px; }
+  .note .meta span { margin-right: auto; }
   .tabs button.on { color: var(--ink); border-bottom-color: var(--accent); }
   .setup { display: grid; gap: 6px; font-size: 13px; }
   .setup .ok { color: var(--good); } .setup .no { color: var(--warn); }
@@ -165,7 +182,7 @@
     <div class="daily" id="daily"></div>
   </header>
 
-  <nav class="tabs"><button data-tab="apps" class="on">Applications</button><button data-tab="outreach">Cold email</button></nav>
+  <nav class="tabs"><button data-tab="apps" class="on">Applications</button><button data-tab="outreach">Cold email</button><button data-tab="notes">Notes</button></nav>
 
   <div class="banner" id="no-claude" hidden>
     Claude Code (the <code>claude</code> command) wasn't found, so Tailor and Track can't run from here.
@@ -225,6 +242,7 @@
       <button id="btn-score" hidden></button>
       <button id="btn-gmail" hidden title="Adds the jobs from Gmail confirmation emails to the tracker, and links the ones already tracked"></button>
     </div>
+    <div id="gmail-box"></div>
     <div class="table-wrap">
       <table>
         <thead><tr><th>Added</th><th>Company</th><th>Role</th><th>Fit</th><th>Status</th><th>Applied</th><th>Resume</th><th>Job</th><th></th></tr></thead>
@@ -232,6 +250,14 @@
       </table>
     </div>
   </section>
+  </div>
+
+  <div id="tab-notes" hidden>
+    <section class="panel">
+      <div class="toolbar"><h2 style="margin:0; margin-right:auto;">Notes</h2>
+        <input id="n-search" placeholder="Search notes"><button class="primary" id="btn-note">New note</button></div>
+      <div id="n-list"></div>
+    </section>
   </div>
 
   <div id="tab-outreach" hidden>
@@ -333,6 +359,7 @@ function render() {
       <td><button class="link" data-toggle="${a.id}">${open.has(a.id) ? "Hide" : "Details"}</button></td></tr>`;
     if (!open.has(a.id)) return row;
     return row + `<tr class="detail"><td colspan="9">
+      ${(a.status_log || []).map(l => `<div class="muted" style="font-size:13px">${esc(l.status)} from Gmail on ${esc(l.date)}: “${esc(l.subject)}” (${esc(l.from)})</div>`).join("")}
       ${a.notes ? `<div class="md">${md(a.notes)}</div>` : `<div class="muted">No notes for this job.</div>`}
       ${qaSection(a)}
       ${a.jd ? `<details><summary>Job description</summary><pre class="jd">${esc(a.jd)}</pre></details>` : ""}
@@ -359,12 +386,41 @@ function renderStats() {
 // --- daily target: jobs applied today (by date_applied), past days drip down below it
 const DAILY_TARGET = 50, DRIP_DAYS = 30;   // past days shown, back to the search start at most
 const isoDay = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-let dailyShown = null, inboxDaily = null, inboxChecking = true, gmailPending = 0;
+let dailyShown = null, inboxDaily = null, inboxChecking = true, gmailPending = 0, gmailState = null;
+
+// --- job statuses read from Gmail (rejections, interview invitations); the ones it can't place are listed for a click
+function renderGmailBox() {
+  const g = gmailState;
+  if (!g) { $("gmail-box").innerHTML = ""; return; }
+  const kind = (st) => st === "Rejected" ? "Rejection" : "Interview";
+  const upd = g.updated.length ? `<details class="gbox"><summary>Updated from Gmail: ${g.updated.length} job(s)</summary>
+      ${g.updated.map(u => `<div class="g"><b>${esc(u.company)}</b> · ${esc(u.role)} → <b>${esc(u.status)}</b> <span class="muted">${esc(u.date)} · “${esc(u.subject)}”</span></div>`).join("")}</details>` : "";
+  const need = g.unmatched.length ? `<details class="gbox" ${gmailBoxOpen ? "open" : ""} data-gbox="1"><summary>From Gmail, needs you: ${g.unmatched.length} email(s) that could be about more than one job</summary>
+      ${g.unmatched.map(u => `<div class="g" data-gs="${esc(u.id)}"><b>${kind(u.status)}</b> <span class="muted">${esc(u.date)} · ${esc(u.from.replace(/<.*>/, "").trim())}</span> · “${esc(u.subject)}”<br>
+        ${u.candidates.map(c => `<button data-rec="${c.id}" title="Mark this job ${esc(u.status)}">#${c.id} ${esc(c.role)}</button>`).join("")}
+        <button class="link" data-rec="" title="Don't change any job for this email">None of these</button></div>`).join("")}</details>` : "";
+  $("gmail-box").innerHTML = (g.error ? `<div class="gbox err">${esc(g.error)}</div>` : "") + need + upd;
+}
+let gmailBoxOpen = false;
+$("gmail-box").addEventListener("toggle", e => { if (e.target.dataset && e.target.dataset.gbox) gmailBoxOpen = e.target.open; }, true);
+$("gmail-box").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-rec]"); if (!b) return;
+  const row = b.closest("[data-gs]"), id = row.dataset.gs;
+  try {
+    await api("/api/gmail-status", {method: "POST", body: JSON.stringify({id, record: b.dataset.rec ? +b.dataset.rec : null})});
+    gmailState.unmatched = gmailState.unmatched.filter(u => u.id !== id); renderGmailBox(); if (b.dataset.rec) loadApps();
+  } catch (err) { alert(err.message); }
+});
 async function loadInboxDaily() {  // always a fresh Gmail check (the server reuses one under 20 s old)
   inboxChecking = true; renderDaily();
-  try { const d = await api("/api/applied-daily?refresh=1"); inboxDaily = d.data || inboxDaily; gmailPending = (d.pending || []).length; }
-  catch { /* keep the last counts */ }
-  inboxChecking = false; renderStats(); renderDaily(); renderGmailButton();
+  try {
+    const d = await api("/api/applied-daily?refresh=1"); inboxDaily = d.data || inboxDaily; gmailPending = (d.pending || []).length;
+    const g = d.gmail || null;
+    if (g && gmailState && g.at !== gmailState.at) { loadApps(); if (!$("tab-outreach").hidden) loadOutreach(false); }  // a background pass finished
+    gmailState = g;
+    if (g && g.running) setTimeout(loadInboxDaily, 25000);   // check back when the background pass is done
+  } catch { /* keep the last counts */ }
+  inboxChecking = false; renderStats(); renderDaily(); renderGmailButton(); renderGmailBox();
 }
 function renderDaily() {
   const tracked = {}; apps.forEach(a => { if (a.date_applied) tracked[a.date_applied] = (tracked[a.date_applied] || 0) + 1; });
@@ -598,11 +654,62 @@ $("rows").addEventListener("click", async e => {
   }
 });
 
+// --- notes (notes.json via the server); each note saves itself a moment after you stop typing
+let notes = [];
+const noteTimers = {};
+async function loadNotes() {
+  try { notes = (await api("/api/notes")).notes; } catch { notes = []; }
+  renderNotes();
+}
+function renderNotes() {
+  const q = $("n-search").value.toLowerCase();
+  const list = notes.filter(n => !q || `${n.title} ${n.body}`.toLowerCase().includes(q)).sort((a, b) => b.updated.localeCompare(a.updated));
+  $("n-list").innerHTML = list.length ? list.map(n => `<div class="note" data-note="${n.id}">
+      <input data-nf="title" value="${esc(n.title)}" placeholder="Title">
+      <textarea data-nf="body" placeholder="Write anything: interview prep, referrals, follow-ups to do…">${esc(n.body)}</textarea>
+      <div class="meta"><span data-nstate>Saved ${esc(n.updated.replace("T", " ").slice(0, 16))}</span><button class="link" data-ncopy>Copy</button><button class="link danger" data-ndel>Delete</button></div></div>`).join("")
+    : `<div class="empty">${notes.length ? "No notes match." : "No notes yet. Click New note."}</div>`;
+  $("n-list").querySelectorAll("textarea").forEach(fitNote);
+}
+// grow a note's text box to show the whole note (capped at 75% of the window, then it scrolls)
+function fitNote(t) { t.style.height = "auto"; t.style.height = Math.max(160, t.scrollHeight + 4) + "px"; }
+$("btn-note").onclick = async () => {
+  try { const n = await api("/api/notes", {method: "POST"}); notes.push(n); $("n-search").value = ""; renderNotes();
+        document.querySelector(`[data-note="${n.id}"] input`).focus(); } catch (err) { alert(err.message); }
+};
+$("n-search").oninput = renderNotes;
+$("n-list").addEventListener("input", e => {
+  const f = e.target.dataset.nf; if (!f) return;
+  const el = e.target.closest("[data-note]"), id = +el.dataset.note, n = notes.find(x => x.id === id);
+  n[f] = e.target.value; el.querySelector("[data-nstate]").textContent = "Saving…";
+  if (f === "body") fitNote(e.target);
+  clearTimeout(noteTimers[id]);
+  noteTimers[id] = setTimeout(async () => {
+    try { const saved = await api(`/api/notes/${id}`, {method: "PATCH", body: JSON.stringify({title: n.title, body: n.body})});
+          n.updated = saved.updated; el.querySelector("[data-nstate]").textContent = `Saved ${saved.updated.replace("T", " ").slice(0, 16)}`; }
+    catch (err) { el.querySelector("[data-nstate]").textContent = "Not saved: " + err.message; }
+  }, 600);
+});
+$("n-list").addEventListener("click", async e => {
+  const copy = e.target.closest("[data-ncopy]");
+  if (copy) {
+    const n = notes.find(x => x.id === +copy.closest("[data-note]").dataset.note);
+    try { await navigator.clipboard.writeText(n.body); copy.textContent = "Copied"; } catch { copy.textContent = "Copy failed"; }
+    setTimeout(() => { copy.textContent = "Copy"; }, 1500);
+    return;
+  }
+  if (!e.target.closest("[data-ndel]")) return;
+  const id = +e.target.closest("[data-note]").dataset.note;
+  if (!confirm("Delete this note?")) return;
+  try { await api(`/api/notes/${id}`, {method: "DELETE"}); notes = notes.filter(n => n.id !== id); renderNotes(); } catch (err) { alert(err.message); }
+});
+
 // --- tabs
 function showTab(name) {
   document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === name));
-  $("tab-apps").hidden = name !== "apps"; $("tab-outreach").hidden = name !== "outreach";
+  $("tab-apps").hidden = name !== "apps"; $("tab-outreach").hidden = name !== "outreach"; $("tab-notes").hidden = name !== "notes";
   if (name === "outreach") loadOutreach(true);
+  if (name === "notes") loadNotes();
   history.replaceState(null, "", name === "apps" ? location.pathname : "#" + name);
 }
 document.querySelector(".tabs").addEventListener("click", e => { const t = e.target.dataset.tab; if (t) showTab(t); });
@@ -615,6 +722,22 @@ const SETUP_CMD = {gmail: `security add-generic-password -s resume-tailor-gmail 
                    hunter: `security add-generic-password -s resume-tailor-hunter -a "$USER" -w`};
 
 let oSync = "";
+const fuOpen = {};   // email key -> {body, ok, why} while its follow-up editor is open
+function followupSection(e, k) {
+  const ago = (iso) => { const d = Math.floor((Date.now() - new Date(iso)) / 86400000); return d <= 0 ? "today" : `${d} day${d > 1 ? "s" : ""} ago`; };
+  const list = (e.followups || []).map((f, i) => `<div class="muted">Follow-up ${i + 1}: ${f.status === "sent" ? `sent ${esc(ago(f.sent_at))}` : "in Gmail Drafts"}</div>`).join("");
+  const head = `<div class="muted">Sent ${e.sent_at ? esc(ago(e.sent_at)) : ""}${e.sent_via ? ` via ${esc(e.sent_via)}` : ""}${e.replied_at ? ` · they replied ${esc(ago(e.replied_at))}` : ""}</div>`;
+  if (e.replied_at) return `<div class="fu">${head}${list}</div>`;
+  const f = fuOpen[k];
+  const editor = !f ? `<button data-oact="fu-open" title="Write a short follow-up, sent as a reply in the same Gmail thread">Follow up</button>`
+    : !f.ok ? `<div class="muted">Can't follow up: ${esc(f.why)}. <button class="link" data-oact="fu-close">Close</button></div>`
+    : `<textarea data-fu="${k}">${esc(f.body)}</textarea>
+       <div class="row"><button class="primary" data-oact="fu-send">Send now</button>
+         <button data-oact="fu-draft" title="Puts the reply in Gmail Drafts, in the same thread">Save to Gmail Drafts</button>
+         <button class="link" data-oact="fu-close">Cancel</button>
+         <span class="muted">Goes as a reply in the original thread (“Re: …”), quoting your first email.</span></div>`;
+  return `<div class="fu">${head}${list}<div class="row">${editor}</div></div>`;
+}
 async function loadOutreach(sync) {  // sync: first pull what changed in Gmail Drafts (edits, sends, deletions)
   if (sync) $("o-sync").textContent = "Syncing with Gmail…";
   try {
@@ -647,6 +770,7 @@ function renderOutreach() {
         <details data-open="m${k}" ${oOpen.has("m" + k) ? "open" : ""}>
         <summary><b>${esc(e.name || e.email)}</b><span class="muted">${esc(e.title)}</span>
           <span class="pill ${e.status}">${{draft: "Draft", gmail_draft: "In Gmail Drafts", sent: "Sent", failed: "Failed"}[e.status]}</span>
+          ${e.replied_at ? `<span class="pill replied">Replied</span>` : (e.followups || []).length ? `<span class="muted">${e.followups.length} follow-up(s)</span>` : ""}
           <span class="subj-line">${esc(subj)}</span></summary>
         <div class="meta">&lt;${esc(e.email)}&gt; · ${esc(e.verification || "")}</div>
         <input class="subj" data-odraft="s${k}" value="${esc(subj)}" ${sent ? "disabled" : ""}>
@@ -657,6 +781,7 @@ function renderOutreach() {
           ${e.status === "gmail_draft" ? `<span class="muted" style="font-size:12px">Edit here or in Gmail: Send sends the Gmail draft</span>`
             : `<button data-oact="draft" ${dirty || !s.gmail ? "disabled" : ""} title="${s.gmail ? "Puts it in Gmail Drafts, where you can also edit it; Send then sends that draft" : "Set up the Gmail app password first"}">Save to Gmail Drafts</button>`}
           <button class="link danger" data-oact="del">Remove</button></div>`}
+        ${sent ? followupSection(e, k) : ""}
         </details>
       </div>`;
     }).join("");
@@ -707,6 +832,7 @@ $("o-list").addEventListener("input", e => {
 $("o-list").addEventListener("toggle", e => {
   const k = e.target.dataset?.open; if (k) e.target.open ? oOpen.add(k) : oOpen.delete(k);
 }, true);
+$("o-list").addEventListener("input", e => { const k = e.target.dataset.fu; if (k && fuOpen[k]) fuOpen[k].body = e.target.value; });
 $("o-list").addEventListener("change", e => { const k = e.target.dataset.opick; if (k) e.target.checked ? oPicked.add(k) : oPicked.delete(k); });
 $("o-list").addEventListener("click", async e => {
   const b = e.target.closest("button[data-oact]"); if (!b) return;
@@ -725,6 +851,15 @@ $("o-list").addEventListener("click", async e => {
       await api(`/api/outreach/${cid}/${eid}`, {method: "DELETE"}); await loadOutreach();
     } else if (act === "delcamp" && confirm(`Delete all emails for ${camp.company}? Sent emails are forgotten too, so they could be emailed again.`)) {
       await api(`/api/outreach/${cid}`, {method: "DELETE"}); await loadOutreach();
+    } else if (act === "fu-open") {
+      const d = await api(`/api/outreach/${cid}/${eid}/followup`); fuOpen[k] = d; renderOutreach();
+    } else if (act === "fu-close") { delete fuOpen[k]; renderOutreach();
+    } else if (act === "fu-send" || act === "fu-draft") {
+      const it = camp.emails.find(x => x.id === eid), draft = act === "fu-draft";
+      if (!draft && !confirm(`Send this follow-up to ${it.name || it.email} now, as a reply in your earlier thread?`)) return;
+      b.disabled = true;
+      await api(`/api/outreach/${cid}/${eid}/followup`, {method: "POST", body: JSON.stringify({body: fuOpen[k].body, draft})});
+      delete fuOpen[k]; await loadOutreach(false);
     } else if (act === "send") {
       const ids = camp.emails.filter(x => oPicked.has(`${cid}.${x.id}`) && x.status !== "sent").map(x => x.id);
       if (!ids.length) return alert("Tick the emails to send first.");
@@ -831,7 +966,7 @@ async function refreshJobs() {
 $("daily").addEventListener("click", e => { if (e.target.closest("[data-recheck]")) loadInboxDaily(); });
 setInterval(() => { if (!document.hidden) loadInboxDaily(); }, 2 * 60 * 1000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) loadInboxDaily(); });
-(async () => { loadInboxDaily(); await loadApps(); await refreshJobs(); if (location.hash === "#outreach") showTab("outreach"); })();
+(async () => { loadInboxDaily(); await loadApps(); await refreshJobs(); if (["#outreach", "#notes"].includes(location.hash)) showTab(location.hash.slice(1)); })();
 </script>
 </body>
 </html>

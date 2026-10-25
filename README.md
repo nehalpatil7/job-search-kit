@@ -11,7 +11,7 @@ The `base/` folder ships with a fictional person (Jordan Lee). Replace it with y
 3. **`base/profile.json`**: your name (used in PDF file names and the email signature), contact details, `city` / `state` / `stateCode` (job-location filters and fit scores), `searchStart` (the date your job search began, for the Gmail totals) and `coldEmailResume` (a PDF to attach to cold emails; null means the base resume).
 4. Run `python3 tools/tracker.py base-pdf`; it should print `resumes/<First>_<Last>_Resume.pdf`.
 
-Nothing personal lives in the code. Your data files (`tracker.json`, `matches.json`, `outreach.json`, `resumes/`) are in `.gitignore`, so they stay out of git; if you push your own copy, decide whether `base/` should be public too.
+Nothing personal lives in the code. Your data files (`tracker.json`, `matches.json`, `outreach.json`, `notes.json`, `resumes/`) are in `.gitignore`, so they stay out of git; if you push your own copy, decide whether `base/` should be public too.
 
 ## What's in the folder
 
@@ -149,16 +149,6 @@ One-time setup (secrets go in the macOS Keychain, never in the project):
 
 CLI: `python3 tools/outreach.py status | list | eml | draft | send` (see the top of the file).
 
-## Morning send from Gmail Drafts (optional)
-
-`tools/gmail-send-drafts.gs` is a Google Apps Script that runs on Google's servers (your Mac can be off). Every weekday at 8:00 AM in the script's `TIME_ZONE` (set it to yours at the top; default `America/Denver`) it sends **every draft in your Gmail Drafts folder** that has a recipient, up to 25 per morning, 15–30 s apart. Sent emails land in Sent Mail, and the Cold email tab marks them Sent the next time it syncs. So the flow is: write the emails here, **Save to Gmail Drafts**, edit them in Gmail if you like, and they go out the next weekday morning. Keep anything you don't want sent out of Drafts.
-
-Setup, once:
-1. Open https://script.google.com, click **New project**, and replace the contents of `Code.gs` with `tools/gmail-send-drafts.gs`. Save.
-2. In the function menu at the top choose **setup**, click **Run**, and allow access to your Gmail when asked.
-
-That creates a check every 5 minutes; it only sends during the 8:00 hour on weekdays. To turn it off, run **stop**. Each run's log is under **Executions** in the script editor.
-
 ## Daily target (top right)
 
 Today's applications against a target of 50, with the last 7 days below. The count comes from application-confirmation emails in Gmail ("Thank you for applying…", "We've received your application…"), so it covers every site you apply on, not just the tracker. Gmail search drops emails that read like rejections, and subjects like "Application Update" or "Important information about your application" are not counted. It reads Gmail read-only (nothing is marked read), rechecks every 5 minutes, and rechecks at once when you click the number. Hover it to see the tracker's count too. Without Gmail access it falls back to jobs marked Applied in the tracker.
@@ -170,3 +160,15 @@ The totals row starts with **Gmail since <date>**: applications (confirmation em
 The counter's column shows the last 30 days, back to the search start at most.
 
 Check what was counted for a day: `python3 tools/inbox.py --list YYYY-MM-DD`. Totals: `python3 tools/inbox.py --totals`.
+
+## Job status from Gmail
+
+While the page is open, every 5 minutes the server reads Gmail (no Claude, no tokens) for rejection emails and interview invitations and updates the matching jobs: **Rejected**, or **Interviewing** for real invitations (interview scheduling, phone/technical/recruiter screens; "we'll reach out if selected" doesn't count). A job only moves forward, never out of Offer, Withdrawn or Rejected, and its Details show the email that changed it. An email is matched to a job when it replies to that job's confirmation, when the company has only one open job, or when the email names the role. When it could be about several jobs ("Thanks for your interest in Uber" with four Uber applications), it's listed under **From Gmail, needs you** above the table: click the job it's about, or **None of these**. Terminal: `python3 tools/tracker.py gmail-status` (apply) or `python3 tools/inbox.py statuses` (preview).
+
+## Sent emails and follow-ups
+
+The same background pass checks your Sent folder for every cold email: anything you send yourself from Gmail (by hand, from a draft, or by a script) is marked **Sent**, and a reply from the recipient shows **Replied**. Each sent email can get up to 2 **Follow ups**, at least 3 days apart and never after a reply. A follow-up is a real reply in the original Gmail thread ("Re: …", quoting your first email), written from an editable template: **Send now**, or **Save to Gmail Drafts** to send it from Gmail yourself. Follow-ups share the 25-a-day cap.
+
+## Notes
+
+The **Notes** tab keeps free-form notes (interview prep, referrals, to-dos). Each note saves itself a moment after you stop typing; search across titles and text, and **Copy** puts a note's text on the clipboard. Stored in `notes.json`.
